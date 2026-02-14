@@ -1,0 +1,152 @@
+# ============================================================
+# 02_age_group_analysis.R
+# 年龄组差异分析
+# SCL-90 心理症状 & Big Five 人格 × 年龄组 Kruskal-Wallis H 检验
+# ============================================================
+
+packages <- c("dplyr", "ggplot2", "dunn.test", "rstatix", "ggpubr", "scales")
+for (pkg in packages) {
+  if (!require(pkg, character.only = TRUE, quietly = TRUE)) {
+    install.packages(pkg, repos = "https://cloud.r-project.org")
+    library(pkg, character.only = TRUE)
+  }
+}
+
+# ── 1. 载入预处理数据 ────────────────────────────────────────
+df <- readRDS("data_processed.rds")
+
+age_group_labels <- c("Adolescent(10-18)", "YoungAdult(19-35)",
+                      "MiddleAge(36-60)",  "Elderly(≥60)")
+df$age_group <- factor(df$age_group, levels = age_group_labels)
+
+# ── 2. 辅助函数：η² 效应量 ───────────────────────────────────
+eta_sq_kw <- function(H, k, N) {
+  # η² = (H - k + 1) / (N - k)，Kruskal-Wallis 版本
+  max(0, (H - k + 1) / (N - k))
+}
+
+# ── 3. Kruskal-Wallis + Dunn 事后检验 ──────────────────────────
+run_kw_analysis <- function(data, vars, group_var = "age_group",
+                            var_labels = NULL, title_prefix = "") {
+  N <- nrow(data)
+  k <- length(levels(data[[group_var]]))
+  results <- list()
+
+  for (v in vars) {
+    kw   <- kruskal.test(as.formula(paste(v, "~", group_var)), data = data)
+    eta2 <- eta_sq_kw(kw$statistic, k, N)
+    label <- if (!is.null(var_labels) && v %in% names(var_labels)) var_labels[v] else v
+
+    cat(sprintf("%-28s H(%d) = %6.2f, p = %.4f, η² = %.3f %s\n",
+                label,
+                kw$parameter,
+                kw$statistic,
+                kw$p.value,
+                eta2,
+                if (kw$p.value < 0.001) "***" else if (kw$p.value < 0.01) "**" else
+                  if (kw$p.value < 0.05) "*" else "ns"))
+
+    results[[v]] <- list(
+      variable = label,
+      H        = round(kw$statistic, 3),
+      df       = kw$parameter,
+      p        = round(kw$p.value, 4),
+      eta2     = round(eta2, 3),
+      sig      = if (kw$p.value < 0.001) "***" else if (kw$p.value < 0.01) "**"
+                 else if (kw$p.value < 0.05) "*" else "ns"
+    )
+  }
+  do.call(rbind, lapply(results, as.data.frame))
+}
+
+# ── 4. SCL-90 各维度年龄组差异 ──────────────────────────────
+scl90_cols   <- c("ZSOM","ZOC","ZIS","ZDEP","ZANX","ZHOS","ZPHOB","ZPAR","ZPSY","ZDiet")
+scl90_labels <- c(
+  ZSOM="躯体化", ZOC="强迫症状", ZIS="人际敏感",
+  ZDEP="抑郁",   ZANX="焦虑",    ZHOS="敌对",
+  ZPHOB="恐怖",  ZPAR="偏执",    ZPSY="精神病性", ZDiet="饮食"
+)
+
+cat("============================================================\n")
+cat("Table 2: SCL-90 各维度的年龄组差异（Kruskal-Wallis H 检验）\n")
+cat("============================================================\n")
+scl90_kw <- run_kw_analysis(df, scl90_cols, var_labels = scl90_labels)
+
+# 各组均值±SD
+cat("\n--- SCL-90 各组均值 ± SD ---\n")
+scl90_summary <- df %>%
+  group_by(age_group) %>%
+  summarise(across(all_of(scl90_cols),
+                   list(mean = ~round(mean(.x, na.rm=TRUE), 2),
+                        sd   = ~round(sd(.x,   na.rm=TRUE), 2))))
+print(as.data.frame(scl90_summary))
+
+# ── 5. Big Five 各维度年龄组差异 ────────────────────────────
+big5_cols   <- c("Neuroticism","Extraversion","Openness","Agreeableness","Conscientiousness")
+big5_labels <- c(
+  Neuroticism="神经质", Extraversion="外向性", Openness="开放性",
+  Agreeableness="宜人性", Conscientiousness="尽责性"
+)
+
+cat("\n============================================================\n")
+cat("Table 3: Big Five 各维度的年龄组差异（Kruskal-Wallis H 检验）\n")
+cat("============================================================\n")
+big5_kw <- run_kw_analysis(df, big5_cols, var_labels = big5_labels)
+
+cat("\n--- Big Five 各组均值 ± SD ---\n")
+big5_summary <- df %>%
+  group_by(age_group) %>%
+  summarise(across(all_of(big5_cols),
+                   list(mean = ~round(mean(.x, na.rm=TRUE), 2),
+                        sd   = ~round(sd(.x,   na.rm=TRUE), 2))))
+print(as.data.frame(big5_summary))
+
+# ── 6. Dunn 事后检验（仅对显著维度）────────────────────────
+cat("\n============================================================\n")
+cat("Dunn 事后检验（Bonferroni 校正）— 显著的 Big Five 维度\n")
+cat("============================================================\n")
+sig_big5 <- big5_cols[sapply(big5_cols, function(v) {
+  kw <- kruskal.test(as.formula(paste(v, "~ age_group")), data = df)
+  kw$p.value < 0.05
+})]
+
+for (v in sig_big5) {
+  cat("\n>>>", v, "\n")
+  dunn_res <- dunn.test(df[[v]], df$age_group,
+                        method = "bonferroni", kw = FALSE, label = TRUE)
+}
+
+# ── 7. 可视化：神经质 & 尽责性（图形保存）───────────────────
+plot_violin <- function(data, var, group_var, title, ylab,
+                        fill_colors = c("#4FC3F7","#81C784","#FFB74D","#E57373")) {
+  ggplot(data, aes_string(x = group_var, y = var, fill = group_var)) +
+    geom_violin(alpha = 0.6, trim = FALSE) +
+    geom_boxplot(width = 0.15, fill = "white", outlier.size = 1.2) +
+    stat_summary(fun = mean, geom = "point", shape = 18, size = 3, color = "black") +
+    scale_fill_manual(values = fill_colors) +
+    labs(title = title, x = "年龄组", y = ylab) +
+    theme_bw(base_size = 12) +
+    theme(legend.position = "none",
+          axis.text.x = element_text(angle = 20, hjust = 1, size = 9),
+          plot.title  = element_text(face = "bold", size = 12))
+}
+
+p1 <- plot_violin(df, "Neuroticism",       "age_group",
+                  "神经质得分 × 年龄组",   "Neuroticism (z-score)")
+p2 <- plot_violin(df, "Conscientiousness", "age_group",
+                  "尽责性得分 × 年龄组",   "Conscientiousness (z-score)")
+p3 <- plot_violin(df, "ZDEP",              "age_group",
+                  "抑郁得分 × 年龄组 (SCL-90)", "Depression (z-score)")
+p4 <- plot_violin(df, "ZANX",              "age_group",
+                  "焦虑得分 × 年龄组 (SCL-90)", "Anxiety (z-score)")
+
+combined <- ggpubr::ggarrange(p1, p2, p3, p4,
+                               ncol = 2, nrow = 2, labels = c("A","B","C","D"))
+ggsave("fig_age_group_differences.png", combined,
+       width = 12, height = 10, dpi = 300)
+cat("\n✅ 图片已保存: fig_age_group_differences.png\n")
+
+# ── 8. 导出汇总表 ────────────────────────────────────────────
+write.csv(scl90_kw, "table2_scl90_age_kw.csv",   row.names = FALSE)
+write.csv(big5_kw,  "table3_big5_age_kw.csv",    row.names = FALSE)
+cat("✅ 表格已保存: table2_scl90_age_kw.csv, table3_big5_age_kw.csv\n")
