@@ -1,0 +1,191 @@
+# ============================================================
+# 04_cluster_personality_symptoms.R
+# 各情绪聚类组的人格特质与心理症状差异分析
+# Kruskal-Wallis H + Dunn 事后检验（Bonferroni 校正）
+# 对应论文 Table 4 & Table 5
+# ============================================================
+
+packages <- c("dplyr", "ggplot2", "dunn.test", "rstatix", "ggpubr",
+              "reshape2", "tidyr", "forcats")
+for (pkg in packages) {
+  if (!require(pkg, character.only = TRUE, quietly = TRUE)) {
+    install.packages(pkg, repos = "https://cloud.r-project.org")
+    library(pkg, character.only = TRUE)
+  }
+}
+
+# ── 1. 载入聚类数据 ──────────────────────────────────────────
+df <- readRDS("data_clustered.rds")
+df$cluster_num <- as.integer(as.character(gsub("\\D.*", "", df$cluster_num)))
+cat("样本量:", nrow(df), "| 各簇:\n")
+print(table(df$cluster))
+
+# ── 2. 定义变量组 ─────────────────────────────────────────────
+# Big Five 分量面（15个）
+big5_facet_cols <- list(
+  Neuroticism       = c("ZAnxiety", "ZDepression", "ZEmotional_volatility"),
+  Extraversion      = c("ZSociability", "ZAssertiveness", "ZEnergy"),
+  Openness          = c("ZIntellectual_curiosity", "ZAesthetic_sensitivity", "ZCreative_imagination"),
+  Agreeableness     = c("ZCompassion", "ZRespectfulness", "ZTrust"),
+  Conscientiousness = c("ZOrganization", "ZProductiveness", "ZResponsibility")
+)
+facet_all <- unlist(big5_facet_cols, use.names = FALSE)
+
+facet_cn_labels <- c(
+  ZAnxiety="焦虑", ZDepression="抑郁", ZEmotional_volatility="情绪波动",
+  ZSociability="社交能力", ZAssertiveness="自信心", ZEnergy="精力",
+  ZIntellectual_curiosity="好奇心", ZAesthetic_sensitivity="审美敏感性",
+  ZCreative_imagination="创造力",
+  ZCompassion="同理心", ZRespectfulness="尊重", ZTrust="信任",
+  ZOrganization="条理性", ZProductiveness="效率", ZResponsibility="责任感"
+)
+
+big5_cols <- c("Neuroticism","Extraversion","Openness","Agreeableness","Conscientiousness")
+scl90_cols <- c("ZSOM","ZOC","ZIS","ZDEP","ZANX","ZHOS","ZPHOB","ZPAR","ZPSY","ZDiet")
+scl90_labels <- c(
+  ZSOM="躯体化", ZOC="强迫症状", ZIS="人际敏感",
+  ZDEP="抑郁",   ZANX="焦虑",    ZHOS="敌对",
+  ZPHOB="恐怖",  ZPAR="偏执",    ZPSY="精神病性", ZDiet="饮食"
+)
+
+# ── 3. Kruskal-Wallis + Dunn 检验主函数 ─────────────────────
+run_kw_dunn <- function(data, vars, group_var = "cluster_num", labels = NULL) {
+  N <- nrow(data)
+  k <- length(unique(data[[group_var]]))
+  output <- list()
+
+  for (v in vars) {
+    lbl <- if (!is.null(labels) && v %in% names(labels)) labels[v] else v
+    x   <- data[[v]]
+    g   <- data[[group_var]]
+    valid <- !is.na(x) & !is.na(g)
+    x <- x[valid]; g <- g[valid]
+
+    kw   <- kruskal.test(x ~ g)
+    eta2 <- max(0, (kw$statistic - k + 1) / (N - k))
+
+    # 各组均值 ± SD
+    grp_stats <- tapply(x, g, function(z) sprintf("%.3f±%.3f", mean(z), sd(z)))
+
+    # Dunn 事后检验（仅当 KW 显著）
+    dunn_pvals <- rep(NA_real_, 3)
+    if (kw$p.value < 0.05) {
+      dtest <- dunn.test(x, g, method = "bonferroni", kw = FALSE, altp = TRUE)
+      # 提取配对结果
+      pair_names <- dtest$comparisons
+      for (j in seq_along(pair_names)) {
+        p_idx <- pmatch(pair_names[j], c("1 - 2","1 - 3","2 - 3"))
+        if (!is.na(p_idx)) dunn_pvals[p_idx] <- round(dtest$altP.adjusted[j], 4)
+      }
+    }
+
+    output[[v]] <- data.frame(
+      Variable = lbl,
+      `C1 (M±SD)` = grp_stats["1"],
+      `C2 (M±SD)` = grp_stats["2"],
+      `C3 (M±SD)` = grp_stats["3"],
+      X2         = round(kw$statistic, 2),
+      p          = round(kw$p.value, 4),
+      eta2       = round(eta2, 3),
+      sig        = if (kw$p.value < 0.001) "***" else if (kw$p.value < 0.01) "**"
+                   else if (kw$p.value < 0.05) "*" else "ns",
+      `p_1vs2`   = dunn_pvals[1],
+      `p_1vs3`   = dunn_pvals[2],
+      `p_2vs3`   = dunn_pvals[3],
+      check.names = FALSE, stringsAsFactors = FALSE
+    )
+  }
+  do.call(rbind, output)
+}
+
+# ── 4. Table 4：Big Five 分量面差异 ─────────────────────────
+cat("============================================================\n")
+cat("Table 4A: 15 个人格分量面 × 情绪聚类组\n")
+cat("============================================================\n")
+tab4_facets <- run_kw_dunn(df, facet_all, labels = facet_cn_labels)
+print(tab4_facets[, 1:8])
+
+cat("\n--- 事后检验 p 值（Bonferroni 校正）---\n")
+print(tab4_facets[, c("Variable","p_1vs2","p_1vs3","p_2vs3")])
+
+cat("\n============================================================\n")
+cat("Table 4B: Big Five 5 个维度 × 情绪聚类组\n")
+cat("============================================================\n")
+big5_labels_cn <- c(
+  Neuroticism="神经质", Extraversion="外向性", Openness="开放性",
+  Agreeableness="宜人性", Conscientiousness="尽责性"
+)
+tab4_big5 <- run_kw_dunn(df, big5_cols, labels = big5_labels_cn)
+print(tab4_big5)
+
+# ── 5. Table 5：SCL-90 症状 × 情绪聚类组 ───────────────────
+cat("\n============================================================\n")
+cat("Table 5: SCL-90 心理症状 × 情绪聚类组\n")
+cat("============================================================\n")
+tab5 <- run_kw_dunn(df, scl90_cols, labels = scl90_labels)
+print(tab5)
+
+# ── 6. 可视化 ────────────────────────────────────────────────
+
+## 6a 雷达图（Big Five × 聚类）————————————————————————
+library(fmsb)   # 若无请 install.packages("fmsb")
+cluster_big5_means <- df %>%
+  group_by(cluster_num) %>%
+  summarise(across(all_of(big5_cols), ~mean(.x, na.rm=TRUE))) %>%
+  select(-cluster_num)
+
+# fmsb 要求前两行是 max / min
+radar_data <- rbind(
+  rep(max(unlist(cluster_big5_means)) + 0.3, 5),
+  rep(min(unlist(cluster_big5_means)) - 0.3, 5),
+  cluster_big5_means
+)
+colnames(radar_data) <- c("Neuroticism","Extraversion","Openness",
+                          "Agreeableness","Conscientiousness")
+
+png("fig_radar_big5_clusters.png", width = 1800, height = 600, res = 150)
+par(mfrow = c(1, 3), mar = c(1, 1, 2, 1))
+cluster_names  <- c("Cluster 1\n(Happiness)", "Cluster 2\n(Anger/Disgust/Fear)",
+                    "Cluster 3\n(Neutral/Sad/Surprise)")
+cluster_colors <- c("#2196F3", "#F44336", "#4CAF50")
+for (i in 1:3) {
+  fmsb::radarchart(
+    radar_data[c(1, 2, i + 2), ],
+    axistype  = 1, pcol = cluster_colors[i],
+    pfcol     = adjustcolor(cluster_colors[i], alpha.f = 0.25),
+    plwd      = 2, cglcol = "grey70", cglty = 1, axislabcol = "grey40",
+    vlcex     = 0.85, title = cluster_names[i]
+  )
+}
+dev.off()
+cat("✅ 雷达图已保存: fig_radar_big5_clusters.png\n")
+
+## 6b 分组箱线图（神经质、外向性）──────────────────────────────
+make_boxplot <- function(var, ylab, fill_colors) {
+  ggplot(df, aes_string(x = "cluster", y = var, fill = "cluster")) +
+    geom_boxplot(alpha = 0.7, outlier.size = 1, linewidth = 0.5) +
+    geom_jitter(width = 0.15, alpha = 0.25, size = 0.7) +
+    scale_fill_manual(values = fill_colors) +
+    labs(x = NULL, y = ylab) +
+    theme_bw(base_size = 11) +
+    theme(legend.position = "none",
+          axis.text.x = element_text(size = 8))
+}
+
+fc <- c("#90CAF9","#EF9A9A","#A5D6A7")
+pb1 <- make_boxplot("Neuroticism",  "Neuroticism (z-score)",  fc)
+pb2 <- make_boxplot("Extraversion", "Extraversion (z-score)", fc)
+pb3 <- make_boxplot("ZDEP", "Depression (z-score)", fc)
+pb4 <- make_boxplot("ZANX", "Anxiety (z-score)",    fc)
+
+fig_bp <- ggarrange(pb1, pb2, pb3, pb4, ncol = 2, nrow = 2,
+                    labels = c("A","B","C","D"))
+ggsave("fig_cluster_personality_symptoms.png", fig_bp,
+       width = 12, height = 9, dpi = 300)
+cat("✅ 箱线图已保存: fig_cluster_personality_symptoms.png\n")
+
+# ── 7. 导出汇总表 ────────────────────────────────────────────
+write.csv(tab4_facets, "table4a_facets_by_cluster.csv",  row.names = FALSE)
+write.csv(tab4_big5,   "table4b_big5_by_cluster.csv",    row.names = FALSE)
+write.csv(tab5,        "table5_scl90_by_cluster.csv",    row.names = FALSE)
+cat("✅ 结果表格已保存\n")
