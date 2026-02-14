@@ -1,0 +1,111 @@
+# ============================================================
+# 01_data_preprocessing.R
+# 数据预处理与描述性统计
+# Paper: Specific Associations Between Personality Traits,
+#        Mental Health, and Emotional Expression
+# ============================================================
+
+# ── 0. 安装/加载依赖包 ──────────────────────────────────────
+packages <- c("readxl", "dplyr", "tidyr", "stringr", "psych", "nortest")
+for (pkg in packages) {
+  if (!require(pkg, character.only = TRUE, quietly = TRUE)) {
+    install.packages(pkg, repos = "https://cloud.r-project.org")
+    library(pkg, character.only = TRUE)
+  }
+}
+
+# ── 1. 读取原始数据 ──────────────────────────────────────────
+# 请将 "原始数据.xlsx" 放在工作目录下，或修改路径
+df_raw <- read_excel("原始数据.xlsx")
+cat("原始数据维度:", nrow(df_raw), "行 ×", ncol(df_raw), "列\n")
+cat("列名:", paste(names(df_raw), collapse = ", "), "\n\n")
+
+# ── 2. 解析情绪概率字符串 ────────────────────────────────────
+# 每个情绪列存储 16 帧的概率值（逗号分隔字符串）
+# → 解析后求均值，作为该参与者的情绪均值概率
+
+emotion_cols <- c("anger", "disgust", "fear", "happy", "neutral", "sad", "surprise")
+
+parse_prob_mean <- function(x) {
+  # 处理数值型（单帧）和字符型（多帧字符串）
+  if (is.numeric(x)) return(x)
+  vals <- as.numeric(unlist(strsplit(as.character(x), "[,\\s]+")))
+  vals <- vals[!is.na(vals)]
+  if (length(vals) == 0) return(NA_real_)
+  return(mean(vals))
+}
+
+for (col in emotion_cols) {
+  df_raw[[paste0("emo_", col)]] <- sapply(df_raw[[col]], parse_prob_mean)
+}
+
+emo_mean_cols <- paste0("emo_", emotion_cols)
+cat("情绪均值概率（前5行）:\n")
+print(round(head(df_raw[, emo_mean_cols], 5), 4))
+
+# ── 3. 构建 Big Five 五个维度 ─────────────────────────────────
+# 每个维度 = 3 个分量面的 z 分均值
+df_raw <- df_raw %>%
+  mutate(
+    Neuroticism       = rowMeans(select(., ZAnxiety, ZDepression, ZEmotional_volatility), na.rm = TRUE),
+    Extraversion      = rowMeans(select(., ZSociability, ZAssertiveness, ZEnergy), na.rm = TRUE),
+    Openness          = rowMeans(select(., ZIntellectual_curiosity, ZAesthetic_sensitivity, ZCreative_imagination), na.rm = TRUE),
+    Agreeableness     = rowMeans(select(., ZCompassion, ZRespectfulness, ZTrust), na.rm = TRUE),
+    Conscientiousness = rowMeans(select(., ZOrganization, ZProductiveness, ZResponsibility), na.rm = TRUE)
+  )
+
+big5_cols <- c("Neuroticism", "Extraversion", "Openness", "Agreeableness", "Conscientiousness")
+
+# ── 4. SCL-90 量表列 ─────────────────────────────────────────
+scl90_cols <- c("ZSOM", "ZOC", "ZIS", "ZDEP", "ZANX", "ZHOS", "ZPHOB", "ZPAR", "ZPSY", "ZDiet")
+
+scl90_labels <- c(
+  ZSOM  = "躯体化", ZOC   = "强迫症状", ZIS   = "人际敏感",
+  ZDEP  = "抑郁",   ZANX  = "焦虑",     ZHOS  = "敌对",
+  ZPHOB = "恐怖",   ZPAR  = "偏执",     ZPSY  = "精神病性", ZDiet = "饮食"
+)
+
+# ── 5. 添加年龄组（从论文描述：按 person_id 推断或若数据含年龄列则使用）
+# 论文分组：青少年10-18(n=36)，青年19-35(n=17)，中年36-60(n=59)，老年≥60(n=39)
+# 本数据集无年龄列，按论文顺序分配年龄组标签（如有年龄列请替换下方逻辑）
+age_group_sizes <- c(36, 17, 59, 39)
+age_group_labels <- c("Adolescent(10-18)", "YoungAdult(19-35)",
+                      "MiddleAge(36-60)",  "Elderly(≥60)")
+df_raw$age_group <- rep(age_group_labels, times = age_group_sizes)
+df_raw$age_group <- factor(df_raw$age_group, levels = age_group_labels)
+cat("\n年龄组分布:\n")
+print(table(df_raw$age_group))
+
+# ── 6. 描述性统计 ─────────────────────────────────────────────
+cat("\n=== Big Five 描述性统计 ===\n")
+print(round(describe(df_raw[, big5_cols])[, c("n","mean","sd","median","min","max","skew","kurtosis")], 3))
+
+cat("\n=== SCL-90 描述性统计 ===\n")
+print(round(describe(df_raw[, scl90_cols])[, c("n","mean","sd","median","min","max")], 3))
+
+cat("\n=== 情绪均值概率描述性统计 ===\n")
+print(round(describe(df_raw[, emo_mean_cols])[, c("n","mean","sd","min","max")], 4))
+
+# ── 7. 正态性检验（Shapiro-Wilk）─────────────────────────────
+cat("\n=== Shapiro-Wilk 正态性检验（Big Five & SCL-90）===\n")
+all_test_cols <- c(big5_cols, scl90_cols)
+sw_results <- data.frame(
+  Variable  = all_test_cols,
+  W         = NA_real_,
+  p_value   = NA_real_,
+  Normal    = NA_character_,
+  stringsAsFactors = FALSE
+)
+for (i in seq_along(all_test_cols)) {
+  x <- na.omit(df_raw[[all_test_cols[i]]])
+  test <- shapiro.test(x)
+  sw_results$W[i]       <- round(test$statistic, 4)
+  sw_results$p_value[i] <- round(test$p.value, 4)
+  sw_results$Normal[i]  <- ifelse(test$p.value > 0.05, "Yes", "No")
+}
+print(sw_results)
+
+# ── 8. 保存清洗后的数据供后续脚本使用 ──────────────────────────
+saveRDS(df_raw, file = "data_processed.rds")
+cat("\n✅ 预处理完成，数据已保存至 data_processed.rds\n")
+cat("   样本量 N =", nrow(df_raw), "\n")
