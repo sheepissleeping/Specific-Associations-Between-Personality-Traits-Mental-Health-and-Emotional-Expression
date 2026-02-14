@@ -1,0 +1,71 @@
+├── 00_run_all.R                        ← 一键运行所有分析
+├── 01_data_preprocessing.R             ← 数据预处理 & 描述性统计
+├── 02_age_group_analysis.R             ← 年龄组差异分析
+├── 03_emotion_clustering.R             ← K-means 情绪聚类
+├── 04_cluster_personality_symptoms.R   ← 聚类组人格/症状差异
+├── 05_mental_health_risk.R             ← 风险评估 & Logistic回归 & ROC
+└── 原始数据.xlsx                        ← 原始数据（需与脚本同目录）
+分析流程
+脚本 01 — 数据预处理
+
+读取 Excel 原始数据（N=151）
+解析每人 16 帧情绪概率字符串 → 计算各情绪均值概率
+构建 Big Five 5 个维度（每个维度 = 3 个 z 分分量面均值）
+按论文年龄分组：青少年(10-18, n=36)、青年(19-35, n=17)、中年(36-60, n=59)、老年(≥60, n=39)
+Shapiro-Wilk 正态性检验
+保存清洗数据至 data_processed.rds
+Script 02 — Age Group Differences (Table 2, 3)
+methodContentKruskal-Wallis H 检验SCL-90 9 dimensions × 4 age groupsKruskal-Wallis H 检验Big Five 5 Dimensions × 4 Age GroupsDunn 事后检验 + Bonferroni 校正Comparison of significant variablesη² effect sizeAll KW inspectionsViolin illustrationNeurotic, conscientious, depressed, anxious
+脚本 03 — 情绪 K-means 聚类(Figure 1, 2, 3)
+StepsmethodOptimal K determinedElbow Method + Silhouette CoefficientClusteringK-means（K=3, nstart=50, 随机种子=42）VisualizationPCA scatter plot (95% confidence ellipse)Emotional distributionBox plot of sentiment probability for each cluster
+Cluster naming:
+
+Cluster 1 — Mainly Happy
+Cluster 2 — Anger / Disgust / Fear Main (Highest Neuroticism & Symptoms)
+Cluster 3 — 以 Neutral / Sad / Surprise 为主
+
+Script 04 — Cluster Group Differences (Table 4, 5)
+
+15 个人格分量面 × 情绪簇（Kruskal-Wallis + Dunn / Bonferroni）
+Big Five 5 Dimensions × Mood Clusters
+SCL-90 10 dimensions × mood clusters
+Radar map (Big Five cluster comparison) + packing box line map
+
+脚本 05 — 风险评估 & 预测(Table 6, 7, 8 & Figure 4)
+3. Standard risk scoring algorithm:
+StandardrulesScoreStandard 1Mean of any SCL-90 dimension ≥ 2.00 or 1Criterion 2The overall mean of SCL-90 ≥ 2.00 or 1Criterion 3≥ The mean of the three dimensions ≥ 1.50 or 1
+Risk Level: Low Risk (0) · Medium Risk (1) · High Risk (2-3)
+
+独立样本 t 检验 / Mann-Whitney U + Bonferroni 校正(低 vs 中/高)
+Binary Logistic Regression (Big Five → Risk Binary Outcomes)
+ROC curve + AUC + Youden index optimal threshold
+
+
+Get started quickly
+Environmental requirements
+
+R ≥ 4.2
+Required R package (script installs automatically): , , ,readxldplyrtidyrggplot2clusterfactoextradunn.testrstatixggpubrpROCbroompsychscalesfmsbreshape2
+
+How to operate
+Method 1: RStudio (recommended)
+r# 1. 打开 RStudio，菜单 Session → Set Working Directory → 选择脚本所在文件夹
+# 2. 打开 00_run_all.R，点击 Source 按钮
+source("00_run_all.R")
+Method 2: Command line
+bashcd /path/to/scripts
+Rscript 00_run_all.R
+Method 3: Gradually run
+rsource("01_data_preprocessing.R")
+source("02_age_group_analysis.R")
+source("03_emotion_clustering.R")
+source("04_cluster_personality_symptoms.R")
+source("05_mental_health_risk.R")
+
+Data Description ()原始数据.xlsx
+Column groupsListDescriptionnumberperson_idParticipant Number (1–151)SCL-90ZSOM, ZOC, ZIS, ZDEP, ZANX, ZHOS, ZPHOB, ZPAR, ZPSY, ZDietz-divided into 10 dimensions, such as somatizationBig Five DimensionsZSociability… (15 columns)ZResponsibilityz Fraction BFI-2 Component FaceEmotional probabilityanger, disgust, fear, happy, neutral, sad, surpriseA 16-frame probability string output from the CNN
+
+Ethics Statement
+This study was approved by the Biomedical Ethics Committee of Hefei University of Technology (No.: HFUT20250110001H, January 10, 2025).
+license
+The code is open under the MIT license; data is protected by privacy, please contact the corresponding author for access.
