@@ -1,0 +1,187 @@
+# ============================================================
+# 03_emotion_clustering.R
+# 情绪 K-means 聚类分析
+# 基于 CNN 输出的 7 种基本情绪概率向量
+# ============================================================
+
+packages <- c("dplyr", "ggplot2", "cluster", "factoextra",
+              "ggpubr", "reshape2", "dunn.test", "rstatix")
+for (pkg in packages) {
+  if (!require(pkg, character.only = TRUE, quietly = TRUE)) {
+    install.packages(pkg, repos = "https://cloud.r-project.org")
+    library(pkg, character.only = TRUE)
+  }
+}
+
+set.seed(42)
+
+# ── 1. 载入预处理数据 ────────────────────────────────────────
+df <- readRDS("data_processed.rds")
+
+emo_mean_cols <- c("emo_anger","emo_disgust","emo_fear",
+                   "emo_happy","emo_neutral","emo_sad","emo_surprise")
+emo_labels    <- c("Anger","Disgust","Fear","Happy","Neutral","Sad","Surprise")
+
+X <- as.matrix(df[, emo_mean_cols])
+cat("情绪矩阵维度:", nrow(X), "×", ncol(X), "\n")
+
+# ── 2. 确定最优 K：Elbow + Silhouette ───────────────────────
+cat("\n计算 K=2..8 的惯性和轮廓系数...\n")
+k_range   <- 2:8
+inertias  <- numeric(length(k_range))
+sil_scores <- numeric(length(k_range))
+
+for (i in seq_along(k_range)) {
+  k  <- k_range[i]
+  km <- kmeans(X, centers = k, nstart = 30, iter.max = 100)
+  inertias[i]   <- km$tot.withinss
+  sil_obj       <- silhouette(km$cluster, dist(X))
+  sil_scores[i] <- mean(sil_obj[, 3])
+  cat(sprintf("  K=%d  Inertia=%.2f  Silhouette=%.4f\n",
+              k, km$tot.withinss, mean(sil_obj[, 3])))
+}
+
+# Elbow 图
+df_elbow <- data.frame(K = k_range, Inertia = inertias)
+p_elbow <- ggplot(df_elbow, aes(x = K, y = Inertia)) +
+  geom_line(color = "#1565C0", linewidth = 1.2) +
+  geom_point(color = "#1565C0", size = 3) +
+  geom_vline(xintercept = 3, linetype = "dashed", color = "#E53935", linewidth = 1) +
+  annotate("text", x = 3.15, y = max(inertias)*0.9, label = "K=3",
+           color = "#E53935", size = 4, hjust = 0) +
+  labs(title = "Elbow Method", x = "Number of Clusters (K)",
+       y = "Inertia (Within-cluster SS)") +
+  theme_bw(base_size = 12) +
+  theme(plot.title = element_text(face = "bold"))
+
+# Silhouette 图
+df_sil <- data.frame(K = k_range, Silhouette = sil_scores)
+p_sil <- ggplot(df_sil, aes(x = K, y = Silhouette)) +
+  geom_line(color = "#E65100", linewidth = 1.2) +
+  geom_point(color = "#E65100", size = 3) +
+  geom_vline(xintercept = 3, linetype = "dashed", color = "#E53935", linewidth = 1) +
+  annotate("text", x = 3.15, y = max(sil_scores)*0.97, label = "K=3",
+           color = "#E53935", size = 4, hjust = 0) +
+  labs(title = "Silhouette Method", x = "Number of Clusters (K)",
+       y = "Average Silhouette Width") +
+  theme_bw(base_size = 12) +
+  theme(plot.title = element_text(face = "bold"))
+
+fig1 <- ggarrange(p_elbow, p_sil, ncol = 2,
+                  top = text_grob("Figure 1. Optimal Number of Clusters",
+                                  face = "bold", size = 13))
+ggsave("fig1_optimal_k.png", fig1, width = 11, height = 4.5, dpi = 300)
+cat("✅ Figure 1 已保存: fig1_optimal_k.png\n")
+
+# ── 3. K=3 聚类 ─────────────────────────────────────────────
+OPTIMAL_K <- 3
+km_final  <- kmeans(X, centers = OPTIMAL_K, nstart = 50, iter.max = 200)
+
+# 计算轮廓宽度
+sil_final <- silhouette(km_final$cluster, dist(X))
+avg_sil   <- mean(sil_final[, 3])
+cat(sprintf("\nK=3 平均轮廓宽度: %.3f\n", avg_sil))
+
+# 识别各簇主导情绪，按论文命名
+centers_df <- as.data.frame(km_final$centers)
+names(centers_df) <- emo_labels
+dominant   <- apply(centers_df, 1, which.max)
+cat("各原始簇主导情绪:\n"); print(dominant)
+
+# 自动映射：happy最高→Cluster1, anger+disgust最高→Cluster2, 其他→Cluster3
+raw_labels <- km_final$cluster
+happy_raw   <- which.max(km_final$centers[, which(emo_mean_cols == "emo_happy")])
+anger_raw   <- which.max(km_final$centers[, which(emo_mean_cols == "emo_anger")] +
+                         km_final$centers[, which(emo_mean_cols == "emo_disgust")])
+neutral_raw <- setdiff(1:3, c(happy_raw, anger_raw))[1]
+
+label_map   <- c(happy_raw, anger_raw, neutral_raw)
+names(label_map) <- c(1, 2, 3)  # 目标标签
+
+cluster_vec <- ifelse(raw_labels == happy_raw,  1L,
+               ifelse(raw_labels == anger_raw,   2L, 3L))
+df$cluster  <- factor(cluster_vec, levels = 1:3,
+                       labels = c("Cluster1\n(Happiness)",
+                                  "Cluster2\n(Anger/Disgust/Fear)",
+                                  "Cluster3\n(Neutral/Sad/Surprise)"))
+
+cat("\n各簇样本量:\n")
+print(table(df$cluster))
+
+# ── 4. PCA 可视化（后验，仅用于展示）──────────────────────────
+pca_res    <- prcomp(X, scale. = FALSE)
+var_pct    <- round(100 * pca_res$sdev^2 / sum(pca_res$sdev^2), 1)
+pca_scores <- as.data.frame(pca_res$x[, 1:2])
+pca_scores$cluster <- df$cluster
+
+cluster_colors <- c("Cluster1\n(Happiness)"          = "#2196F3",
+                    "Cluster2\n(Anger/Disgust/Fear)"  = "#F44336",
+                    "Cluster3\n(Neutral/Sad/Surprise)"= "#4CAF50")
+
+p_pca <- ggplot(pca_scores, aes(x = PC1, y = PC2, color = cluster)) +
+  stat_ellipse(aes(fill = cluster), geom = "polygon",
+               level = 0.95, alpha = 0.10, linewidth = 0.8) +
+  geom_point(alpha = 0.7, size = 2) +
+  scale_color_manual(values = cluster_colors) +
+  scale_fill_manual(values  = cluster_colors) +
+  labs(
+    title    = paste0("Figure 2. Clustering Visualization\n",
+                      "Average Silhouette Width = ", round(avg_sil, 3),
+                      " | Number of Clusters = 3"),
+    x        = paste0("PC1 (", var_pct[1], "% variance)"),
+    y        = paste0("PC2 (", var_pct[2], "% variance)"),
+    color    = "Cluster",
+    fill     = "Cluster"
+  ) +
+  theme_bw(base_size = 12) +
+  theme(plot.title  = element_text(face = "bold", size = 11),
+        legend.text = element_text(size = 9))
+
+ggsave("fig2_pca_clusters.png", p_pca, width = 7, height = 6, dpi = 300)
+cat("✅ Figure 2 已保存: fig2_pca_clusters.png\n")
+
+# ── 5. 各簇情绪分布箱线图 ───────────────────────────────────
+df_long <- df %>%
+  select(cluster, all_of(emo_mean_cols)) %>%
+  pivot_longer(cols = all_of(emo_mean_cols),
+               names_to  = "Emotion",
+               values_to = "Probability") %>%
+  mutate(Emotion = factor(Emotion, levels = emo_mean_cols, labels = emo_labels))
+
+p_box <- ggplot(df_long, aes(x = Emotion, y = Probability, fill = cluster)) +
+  geom_boxplot(alpha = 0.7, outlier.size = 0.8, linewidth = 0.5) +
+  facet_wrap(~ cluster, ncol = 3) +
+  scale_fill_manual(values = c("#90CAF9","#EF9A9A","#A5D6A7")) +
+  labs(title = "Figure 3. Emotion Distribution Across Clusters",
+       x = "Emotion", y = "Probability") +
+  theme_bw(base_size = 11) +
+  theme(
+    axis.text.x  = element_text(angle = 30, hjust = 1, size = 9),
+    strip.text   = element_text(face = "bold", size = 9),
+    legend.position = "none",
+    plot.title   = element_text(face = "bold", size = 12)
+  ) +
+  coord_cartesian(ylim = c(0, 1))
+
+ggsave("fig3_emotion_boxplots.png", p_box, width = 13, height = 5, dpi = 300)
+cat("✅ Figure 3 已保存: fig3_emotion_boxplots.png\n")
+
+# ── 6. 各簇人口学分布（性别 & 年龄，参考论文 3.2.3）────────────
+cat("\n=== 各簇年龄组分布（Kruskal-Wallis）===\n")
+df$cluster_num <- cluster_vec
+kw_age <- kruskal.test(cluster_num ~ age_group, data = df)
+cat(sprintf("H(%d) = %.3f, p = %.4f\n",
+            kw_age$parameter, kw_age$statistic, kw_age$p.value))
+
+# ── 7. 保存含聚类标签的数据 ─────────────────────────────────
+saveRDS(df, file = "data_clustered.rds")
+write.csv(df %>% select(person_id, cluster, cluster_num),
+          "cluster_assignments.csv", row.names = FALSE)
+cat("✅ 聚类结果已保存: data_clustered.rds, cluster_assignments.csv\n")
+
+# ── 8. 聚类中心汇总 ─────────────────────────────────────────
+cat("\n=== 各簇情绪均值 ===\n")
+cluster_means <- df %>%
+  group_by(cluster) %>%
+  summarise(across(all_of(emo_mean_cols), ~round(mean(.x, na.rm=TRUE), 4)))
+print(as.data.frame(cluster_means))
