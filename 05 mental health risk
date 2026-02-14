@@ -1,0 +1,218 @@
+# ============================================================
+# 05_mental_health_risk.R
+# 心理健康风险评估 & Logistic 回归预测
+# 对应论文 3.4 节 (Table 6, 7, 8 & Figure 4)
+# ============================================================
+
+packages <- c("dplyr", "ggplot2", "pROC", "rstatix", "ggpubr",
+              "tidyr", "broom", "scales")
+for (pkg in packages) {
+  if (!require(pkg, character.only = TRUE, quietly = TRUE)) {
+    install.packages(pkg, repos = "https://cloud.r-project.org")
+    library(pkg, character.only = TRUE)
+  }
+}
+
+# ── 1. 载入数据 ──────────────────────────────────────────────
+df <- readRDS("data_clustered.rds")
+cat("N =", nrow(df), "\n")
+
+# ── 2. SCL-90 三标准风险评分算法 ────────────────────────────
+# 数据为 z 分，用近似原始分（假设总体均值≈1.39, SD≈0.38）还原
+POP_MEAN <- 1.39
+POP_SD   <- 0.38
+
+scl90_z_cols <- c("ZSOM","ZOC","ZIS","ZDEP","ZANX","ZHOS","ZPHOB","ZPAR","ZPSY","ZDiet")
+scl90_raw    <- df[, scl90_z_cols] * POP_SD + POP_MEAN
+
+# Criterion 1: 任意维度均值 ≥ 2.0
+crit1 <- as.integer(apply(scl90_raw, 1, function(r) any(r >= 2.0, na.rm = TRUE)))
+# Criterion 2: 整体均值 ≥ 2.0
+crit2 <- as.integer(rowMeans(scl90_raw, na.rm = TRUE) >= 2.0)
+# Criterion 3: ≥ 3 个维度均值 ≥ 1.5
+crit3 <- as.integer(rowSums(scl90_raw >= 1.5, na.rm = TRUE) >= 3)
+
+df$risk_score    <- crit1 + crit2 + crit3
+df$risk_category <- factor(
+  case_when(
+    df$risk_score == 0 ~ "Low",
+    df$risk_score == 1 ~ "Medium",
+    TRUE               ~ "High"
+  ),
+  levels = c("Low", "Medium", "High")
+)
+# 二元变量：0=低风险, 1=中/高风险
+df$risk_binary <- as.integer(df$risk_category != "Low")
+
+# ── 3. Table 6：风险分布 ─────────────────────────────────────
+cat("\n=== Table 6: 心理健康风险分布 ===\n")
+risk_dist <- df %>%
+  count(risk_category) %>%
+  mutate(
+    risk_score = case_when(
+      risk_category == "Low"    ~ "0",
+      risk_category == "Medium" ~ "1",
+      TRUE                      ~ "2-3"
+    ),
+    pct = scales::percent(n / sum(n), accuracy = 0.1)
+  ) %>%
+  select(risk_category, risk_score, n, pct)
+
+total_row <- data.frame(
+  risk_category = "Total", risk_score = "0-3",
+  n = nrow(df), pct = "100.0%"
+)
+risk_table <- rbind(as.data.frame(risk_dist), total_row)
+print(risk_table)
+
+# ── 4. Big Five 维度（已在 01_ 脚本中生成） ─────────────────
+big5_cols <- c("Neuroticism","Extraversion","Openness","Agreeableness","Conscientiousness")
+
+# ── 5. Table 7：低风险 vs 中/高风险的 Big Five 差异 ──────────
+cat("\n=== Table 7: Big Five × 风险组比较 ===\n")
+low_grp  <- df %>% filter(risk_category == "Low")
+high_grp <- df %>% filter(risk_category != "Low")
+cat(sprintf("低风险 n=%d，中/高风险 n=%d\n", nrow(low_grp), nrow(high_grp)))
+
+compare_results <- lapply(big5_cols, function(v) {
+  lo <- low_grp[[v]];  hi <- high_grp[[v]]
+  # Shapiro-Wilk
+  sw_lo <- shapiro.test(lo)$p.value
+  sw_hi <- shapiro.test(hi)$p.value
+  if (sw_lo > 0.05 && sw_hi > 0.05) {
+    tt  <- t.test(lo, hi, var.equal = FALSE)
+    test_name <- "t"; stat <- tt$statistic; p <- tt$p.value
+  } else {
+    mw  <- wilcox.test(lo, hi, exact = FALSE)
+    test_name <- "U"; stat <- mw$statistic; p <- mw$p.value
+  }
+  # Cohen's d
+  pool_sd <- sqrt(((length(lo)-1)*var(lo) + (length(hi)-1)*var(hi)) /
+                  (length(lo)+length(hi)-2))
+  d <- abs(mean(lo)-mean(hi)) / ifelse(pool_sd>0, pool_sd, 1)
+  data.frame(
+    Trait         = v,
+    Low_MSD       = sprintf("%.2f±%.2f", mean(lo), sd(lo)),
+    HighMed_MSD   = sprintf("%.2f±%.2f", mean(hi), sd(hi)),
+    Test          = test_name,
+    Statistic     = round(stat, 3),
+    p_value       = round(p, 4),
+    Cohens_d      = round(d, 2),
+    Sig           = if (p < 0.001) "***" else if (p < 0.01) "**"
+                    else if (p < 0.05) "*" else "ns",
+    stringsAsFactors = FALSE
+  )
+})
+tab7 <- do.call(rbind, compare_results)
+# Bonferroni 校正
+tab7$p_bonferroni <- pmin(tab7$p_value * nrow(tab7), 1)
+tab7$Sig_Bonf     <- ifelse(tab7$p_bonferroni < 0.01, "**",
+                    ifelse(tab7$p_bonferroni < 0.05, "*", "ns"))
+print(tab7)
+
+# ── 6. Table 8：Binary Logistic Regression ───────────────────
+cat("\n=== Table 8: Logistic 回归（Big Five → 风险二元）===\n")
+# 标准化 Big Five
+X_scaled <- scale(df[, big5_cols])
+df_glm   <- as.data.frame(X_scaled)
+names(df_glm) <- big5_cols
+df_glm$risk_binary <- df$risk_binary
+
+lr_model <- glm(risk_binary ~ ., data = df_glm, family = binomial(link = "logit"))
+lr_sum   <- summary(lr_model)
+
+cat("\nModel Summary:\n")
+print(lr_sum)
+
+# Nagelkerke R²
+ll_full <- as.numeric(logLik(lr_model))
+ll_null <- as.numeric(logLik(update(lr_model, . ~ 1)))
+n       <- nrow(df_glm)
+mcf_r2  <- 1 - ll_full / ll_null
+nagel_r2 <- (1 - exp(-2/n * (ll_full - ll_null))) / (1 - exp(-2/n * ll_null))
+cat(sprintf("\nNagelkerke R² = %.3f\nMcFadden R²   = %.3f\n", nagel_r2, mcf_r2))
+
+# 汇总系数表
+coef_table <- broom::tidy(lr_model, conf.int = TRUE, exponentiate = FALSE) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(
+    OR      = round(exp(estimate), 2),
+    CI_lo   = round(exp(conf.low),  2),
+    CI_hi   = round(exp(conf.high), 2),
+    CI_str  = paste0(CI_lo, "–", CI_hi),
+    Std_beta = round(estimate, 3),
+    p_sig   = if_else(p.value < 0.001, "***",
+              if_else(p.value < 0.01,  "**",
+              if_else(p.value < 0.05,  "*", "ns")))
+  ) %>%
+  select(term, estimate, std.error, statistic, p.value, Std_beta, OR, CI_str, p_sig) %>%
+  rename(B = estimate, SE = std.error, `Wald Z` = statistic, p = p.value)
+print(as.data.frame(coef_table))
+
+# ── 7. ROC 曲线分析 ──────────────────────────────────────────
+pred_prob <- predict(lr_model, type = "response")
+roc_obj   <- roc(df_glm$risk_binary, pred_prob,
+                 quiet = TRUE, ci = TRUE, direction = "<")
+
+auc_val  <- as.numeric(auc(roc_obj))
+ci_vals  <- as.numeric(ci(roc_obj))
+cat(sprintf("\nAUC = %.3f (95%% CI: %.3f–%.3f)\n", auc_val, ci_vals[1], ci_vals[3]))
+
+# Youden 最优阈值
+coords_df  <- coords(roc_obj, "best", ret = c("threshold","sensitivity",
+                                               "specificity","ppv","npv",
+                                               "accuracy"), best.method = "youden")
+cat("\n最优阈值（Youden Index）:\n")
+print(round(coords_df, 3))
+
+# Figure 4
+roc_df <- data.frame(
+  FPR = 1 - roc_obj$specificities,
+  TPR = roc_obj$sensitivities
+)
+
+p_roc <- ggplot(roc_df, aes(x = FPR, y = TPR)) +
+  geom_ribbon(aes(ymin = 0, ymax = TPR), fill = "#1565C0", alpha = 0.08) +
+  geom_line(color = "#1565C0", linewidth = 1.8) +
+  geom_abline(slope = 1, intercept = 0,
+              linetype = "dashed", color = "steelblue", linewidth = 1) +
+  geom_point(aes(x = 1 - coords_df$specificity,
+                 y = coords_df$sensitivity),
+             color = "#E53935", size = 4, shape = 16) +
+  annotate("text",
+           x = 1 - coords_df$specificity + 0.06,
+           y = coords_df$sensitivity - 0.04,
+           label = sprintf("Optimal cutoff = %.3f\nSens=%.3f, Spec=%.3f",
+                           coords_df$threshold,
+                           coords_df$sensitivity,
+                           coords_df$specificity),
+           size = 3.2, color = "#B71C1C", hjust = 0) +
+  annotate("text",
+           x = 0.65, y = 0.15,
+           label = sprintf("AUC = %.3f\n(95%% CI: %.3f–%.3f)",
+                           auc_val, ci_vals[1], ci_vals[3]),
+           size = 4, color = "#1565C0", fontface = "bold") +
+  scale_x_continuous(limits = c(-0.01, 1.01), labels = scales::percent_format(1)) +
+  scale_y_continuous(limits = c(-0.01, 1.01), labels = scales::percent_format(1)) +
+  labs(
+    title    = "Figure 4. ROC Curve: Personality Traits Predicting Mental Health Risk",
+    subtitle = "The blue dashed line represents the random guessing baseline",
+    x        = "False Positive Rate (1 - Specificity)",
+    y        = "True Positive Rate (Sensitivity)"
+  ) +
+  theme_bw(base_size = 12) +
+  theme(plot.title    = element_text(face = "bold", size = 12),
+        plot.subtitle = element_text(color = "grey50", size = 9))
+
+ggsave("fig4_roc_curve.png", p_roc, width = 7, height = 6.5, dpi = 300)
+cat("✅ Figure 4 已保存: fig4_roc_curve.png\n")
+
+# ── 8. 导出结果 ──────────────────────────────────────────────
+write.csv(risk_table,            "table6_risk_distribution.csv",    row.names = FALSE)
+write.csv(tab7,                  "table7_personality_by_risk.csv",  row.names = FALSE)
+write.csv(as.data.frame(coef_table), "table8_logistic_coefs.csv",  row.names = FALSE)
+
+# 保存含风险标签的完整数据
+saveRDS(df, "data_final.rds")
+cat("✅ 所有结果已保存\n")
+cat("✅ 最终数据已保存: data_final.rds\n")
