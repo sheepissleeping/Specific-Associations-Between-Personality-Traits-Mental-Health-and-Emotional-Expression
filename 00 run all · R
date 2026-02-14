@@ -1,0 +1,73 @@
+# ============================================================
+# 00_run_all.R
+# 主控脚本：按顺序运行所有分析
+#
+# 使用方法：
+#   1. 把 "原始数据.xlsx" 放在本脚本同一目录
+#   2. 在 R / RStudio 中运行本脚本
+#      source("00_run_all.R")
+#   或在 R 命令行：Rscript 00_run_all.R
+# ============================================================
+
+cat("╔══════════════════════════════════════════════════════╗\n")
+cat("║  Personality × Emotion × Mental Health Analysis      ║\n")
+cat("║  Lingping Meng, Mingzheng Li, Xiao Sun               ║\n")
+cat("╚══════════════════════════════════════════════════════╝\n\n")
+
+# 将工作目录设置为本脚本所在文件夹
+# （RStudio 中推荐用 Session → Set Working Directory → Source File Location）
+# setwd(dirname(rstudioapi::getSourceEditorContext()$path))
+
+# 检查原始数据文件
+if (!file.exists("原始数据.xlsx")) {
+  stop("❌ 未找到 '原始数据.xlsx'，请将数据文件放在当前工作目录。\n",
+       "   当前目录：", getwd())
+}
+
+# 脚本执行顺序
+scripts <- c(
+  "01_data_preprocessing.R",        # 数据清洗、解析情绪概率、正态性检验
+  "02_age_group_analysis.R",         # 年龄组 × SCL-90 & Big Five 差异（Table 2, 3）
+  "03_emotion_clustering.R",         # K-means 情绪聚类（Figure 1, 2, 3）
+  "04_cluster_personality_symptoms.R", # 聚类组 × 人格 & 症状差异（Table 4, 5）
+  "05_mental_health_risk.R"          # 风险评估 & Logistic 回归 & ROC（Table 6,7,8, Fig 4）
+)
+
+for (script in scripts) {
+  cat(rep("─", 58), "\n", sep = "")
+  cat("▶ 运行:", script, "\n")
+  cat(rep("─", 58), "\n", sep = "")
+  tryCatch(
+    source(script, echo = FALSE),
+    error = function(e) {
+      cat("❌ 脚本出错:", conditionMessage(e), "\n")
+      cat("   请检查该脚本后重新运行。\n")
+    }
+  )
+  cat("\n")
+}
+
+cat("╔══════════════════════════════════════════════════════╗\n")
+cat("║  ✅ 所有分析完成！                                    ║\n")
+cat("║                                                      ║\n")
+cat("║  生成的文件：                                         ║\n")
+cat("║  📊 数据:  data_processed.rds                        ║\n")
+cat("║            data_clustered.rds                        ║\n")
+cat("║            data_final.rds                            ║\n")
+cat("║            cluster_assignments.csv                   ║\n")
+cat("║  📋 表格:  table2_scl90_age_kw.csv                   ║\n")
+cat("║            table3_big5_age_kw.csv                    ║\n")
+cat("║            table4a_facets_by_cluster.csv             ║\n")
+cat("║            table4b_big5_by_cluster.csv               ║\n")
+cat("║            table5_scl90_by_cluster.csv               ║\n")
+cat("║            table6_risk_distribution.csv              ║\n")
+cat("║            table7_personality_by_risk.csv            ║\n")
+cat("║            table8_logistic_coefs.csv                 ║\n")
+cat("║  🖼  图片:  fig1_optimal_k.png                        ║\n")
+cat("║            fig2_pca_clusters.png                     ║\n")
+cat("║            fig3_emotion_boxplots.png                 ║\n")
+cat("║            fig4_roc_curve.png                        ║\n")
+cat("║            fig_age_group_differences.png             ║\n")
+cat("║            fig_radar_big5_clusters.png               ║\n")
+cat("║            fig_cluster_personality_symptoms.png      ║\n")
+cat("╚══════════════════════════════════════════════════════╝\n")
