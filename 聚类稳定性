@@ -1,0 +1,107 @@
+# ============================================================
+# 聚类稳定性分析 - K-means 100次随机初始化
+# ============================================================
+
+packages <- c("readxl", "dplyr", "fossil")
+for (pkg in packages) {
+  if (!require(pkg, character.only = TRUE, quietly = TRUE)) {
+    install.packages(pkg, repos = "https://cran.rstudio.com/")
+    library(pkg, character.only = TRUE)
+  }
+}
+
+# ============================================================
+# 1. 读取数据
+# ============================================================
+data <- read_excel("C:/Users/48538/Desktop/新建文件夹/xg.xlsx")
+cat("原始数据行数:", nrow(data), "\n")
+
+# ============================================================
+# 2. 解析情绪列（每格是逗号分隔的多帧数值字符串，取均值）
+# ============================================================
+emotion_cols <- c("anger", "disgust", "fear", "happy", "neutral", "sad", "surprise")
+
+parse_mean <- function(x) {
+  if (is.na(x) || x == "") return(NA)
+  vals <- suppressWarnings(as.numeric(trimws(strsplit(as.character(x), ",")[[1]])))
+  vals <- vals[!is.na(vals)]
+  if (length(vals) == 0) return(NA)
+  mean(vals)
+}
+
+for (col in emotion_cols) {
+  data[[col]] <- sapply(data[[col]], parse_mean)
+}
+
+# 提取情绪数据并删除缺失值
+emotion_data <- data[, emotion_cols]
+emotion_data <- emotion_data[complete.cases(emotion_data), ]
+cat("有效样本量:", nrow(emotion_data), "\n")
+
+# ============================================================
+# 3. 基准聚类（与原文一致，K=3，不标准化）
+# ============================================================
+set.seed(42)
+base_km <- kmeans(emotion_data, centers = 3, nstart = 25, iter.max = 100)
+base_labels <- base_km$cluster
+cat("\n基准聚类各簇样本量:\n")
+print(table(base_labels))
+
+# ============================================================
+# 4. 100次随机初始化稳定性检验
+# ============================================================
+cat("\n开始100次随机初始化稳定性检验...\n")
+
+n_runs <- 100
+ari_values <- numeric(n_runs)
+
+for (i in 1:n_runs) {
+  set.seed(i)
+  km_i <- kmeans(emotion_data, centers = 3, nstart = 1, iter.max = 100)
+  ari_values[i] <- rand.index(base_labels, km_i$cluster)
+}
+
+cat("\n====== 聚类稳定性结果 ======\n")
+cat("ARI 均值:", round(mean(ari_values), 3), "\n")
+cat("ARI 标准差:", round(sd(ari_values), 3), "\n")
+cat("ARI 最小值:", round(min(ari_values), 3), "\n")
+cat("ARI 最大值:", round(max(ari_values), 3), "\n")
+cat("ARI > 0.8 的比例:", round(mean(ari_values > 0.8), 3), "\n")
+cat("ARI > 0.9 的比例:", round(mean(ari_values > 0.9), 3), "\n")
+
+# ============================================================
+# 5. 保存结果
+# ============================================================
+output_dir <- "C:/Users/48538/Desktop/yxiu"
+if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+
+# 文字结果
+sink(file.path(output_dir, "cluster_stability_results.txt"))
+cat("========================================\n")
+cat("K-means聚类稳定性分析结果（100次随机初始化）\n")
+cat("========================================\n\n")
+cat("基准聚类各簇样本量:\n")
+print(table(base_labels))
+cat("\nARI 均值:", round(mean(ari_values), 3), "\n")
+cat("ARI 标准差:", round(sd(ari_values), 3), "\n")
+cat("ARI 最小值:", round(min(ari_values), 3), "\n")
+cat("ARI 最大值:", round(max(ari_values), 3), "\n")
+cat("ARI > 0.8 的比例:", round(mean(ari_values > 0.8), 3), "\n")
+cat("ARI > 0.9 的比例:", round(mean(ari_values > 0.9), 3), "\n")
+sink()
+
+# ARI分布图
+png(file.path(output_dir, "cluster_stability_ARI.png"), width = 700, height = 500)
+hist(ari_values, breaks = 20, col = "steelblue", border = "white",
+     main = "Distribution of ARI across 100 Random Initializations",
+     xlab = "Adjusted Rand Index (ARI)", ylab = "Frequency")
+abline(v = mean(ari_values), col = "red", lwd = 2, lty = 2)
+legend("topleft", legend = paste0("Mean ARI = ", round(mean(ari_values), 3)),
+       col = "red", lwd = 2, lty = 2)
+dev.off()
+
+cat("\n========================================\n")
+cat("结果已保存到:", output_dir, "\n")
+cat("  - cluster_stability_results.txt\n")
+cat("  - cluster_stability_ARI.png\n")
+cat("========================================\n")
