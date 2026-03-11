@@ -1,0 +1,71 @@
+# ============================================================
+# Multiple Comparison Correction for Kruskal-Wallis Tests
+# Bonferroni + Benjamini-Hochberg (FDR)
+# ============================================================
+
+library(readxl)
+library(dplyr)
+
+# ---- 读取数据 ----
+df <- read_excel("C:/Users/48538/Desktop/新建文件夹/xg.xlsx")
+
+# ---- 转换变量类型 ----
+df$SOM        <- as.numeric(df$SOM)
+df$Neuroticism <- as.numeric(df$Neuroticism)
+df$age_x      <- as.numeric(df$age_x)
+
+# ---- 分组 ----
+df$age_group <- cut(df$age_x,
+                    breaks = c(0, 18, 35, 60, Inf),
+                    labels = c("Adolescent", "Young Adult", "Middle-aged", "Older Adult"),
+                    right  = TRUE)
+
+# ---- 15个结果变量 ----
+vars15 <- c("SOM", "O-C", "I-S", "DEP", "ANX", "HOS", "PHOB", "PAR", "PSY",
+            "Neuroticism", "Agreeableness", "Conscientiousness", "Openness", "Extraversion")
+
+# ---- 逐变量跑 Kruskal-Wallis，收集 H 和 p ----
+results <- data.frame(
+  Variable = vars15,
+  H        = NA_real_,
+  p_raw    = NA_real_
+)
+
+for (i in seq_along(vars15)) {
+  v    <- vars15[i]
+  dat  <- df[, c(v, "age_group")]
+  colnames(dat) <- c("score", "group")
+  dat  <- dat[!is.na(dat$score), ]
+  
+  kt <- kruskal.test(score ~ group, data = dat)
+  results$H[i]     <- round(kt$statistic, 3)
+  results$p_raw[i] <- kt$p.value
+}
+
+# ---- Bonferroni 校正（alpha = 0.05/15 = 0.0033）----
+results$p_bonferroni <- p.adjust(results$p_raw, method = "bonferroni")
+results$sig_bonferroni <- ifelse(results$p_bonferroni < 0.05, "Yes", "No")
+
+# ---- Benjamini-Hochberg FDR 校正 ----
+results$q_BH    <- p.adjust(results$p_raw, method = "BH")
+results$sig_BH  <- ifelse(results$q_BH < 0.05, "Yes", "No")
+
+# ---- 格式化输出 ----
+results$p_raw         <- round(results$p_raw, 4)
+results$p_bonferroni  <- round(results$p_bonferroni, 4)
+results$q_BH          <- round(results$q_BH, 4)
+
+# ---- 打印结果 ----
+cat("\n===== Multiple Comparison Correction Results =====\n\n")
+print(results, row.names = FALSE)
+
+cat("\n\nNote:\n")
+cat("Bonferroni threshold: alpha = 0.05/15 =", round(0.05/15, 4), "\n")
+cat("BH threshold: q < 0.05\n")
+
+# ---- 保存结果到 Excel ----
+library(writexl)
+write_xlsx(results,
+           path = "C:/Users/48538/Desktop/新建文件夹 (9)/multiple_comparison_results.xlsx")
+
+cat("\nResults saved to: C:/Users/48538/Desktop/新建文件夹 (9)/multiple_comparison_results.xlsx\n")
