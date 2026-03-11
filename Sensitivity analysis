@@ -1,0 +1,197 @@
+# ============================================================
+# 敏感性分析：剔除10-11岁参与者后的稳健性检验（修复版）
+# 修复：O-C / I-S 列名特殊字符导致的 rowMeans 数值类型报错
+# ============================================================
+
+# ---- 0. 安装/加载包 ----------------------------------------
+packages <- c("readxl", "dplyr", "tidyr", "rstatix", "openxlsx")
+for (pkg in packages) {
+  if (!require(pkg, character.only = TRUE, quietly = TRUE)) {
+    install.packages(pkg, repos = "https://cloud.r-project.org")
+    library(pkg, character.only = TRUE)
+  }
+}
+
+# ---- 1. 读取数据 -------------------------------------------
+input_path <- "C:\\Users\\48538\\Desktop\\新建文件夹\\xg.xlsx"
+output_dir <- "C:\\Users\\48538\\Desktop\\新建文件夹 (9)\\"
+
+df_raw <- read_excel(input_path, col_names = TRUE)
+
+# 删掉第1列（空列）
+df_raw <- df_raw[, -1]
+
+# ★ 关键修复：直接按列位置强制重命名
+# 原列名 O-C、I-S 含特殊字符，readxl 读入后可能变成 O.C、I.S 或其他
+# 强制用安全名称，避免后续找不到列
+colnames(df_raw)[1:43] <- c(
+  "name", "age", "gender", "occupation",
+  "SOM", "OC", "IS", "DEP", "ANX", "HOS", "PHOB", "PAR", "PSY",
+  "Sleep", "Diet", "Others",
+  "Neuroticism", "Agreeableness", "Conscientiousness", "Openness", "Extraversion",
+  "Sociability", "Assertiveness", "Energy", "Compassion", "Respectfulness",
+  "Trust", "Organization", "Productiveness", "Responsibility",
+  "Anxiety_f", "Depression_f", "Emotional_volatility",
+  "Intellectual_curiosity", "Aesthetic_sensitivity", "Creative_imagination",
+  "anger_raw", "disgust_raw", "fear_raw", "happy_raw",
+  "neutral_raw", "sad_raw", "surprise_raw"
+)
+
+# ---- 2. 强制 SCL-90 和 Big Five 列转为数值型 ---------------
+scl90_dims <- c("SOM","OC","IS","DEP","ANX","HOS","PHOB","PAR","PSY")
+big5       <- c("Neuroticism","Extraversion","Openness","Agreeableness","Conscientiousness")
+
+for (col in c(scl90_dims, big5)) {
+  df_raw[[col]] <- as.numeric(df_raw[[col]])
+}
+
+# ---- 3. 处理情绪列（多帧概率字符串 → 均值）----------------
+parse_emotion <- function(x) {
+  vals <- suppressWarnings(
+    as.numeric(unlist(strsplit(as.character(x), ",\\s*")))
+  )
+  mean(vals, na.rm = TRUE)
+}
+
+emotion_raw   <- c("anger_raw","disgust_raw","fear_raw","happy_raw",
+                   "neutral_raw","sad_raw","surprise_raw")
+emotion_names <- c("anger","disgust","fear","happy","neutral","sad","surprise")
+
+for (i in seq_along(emotion_raw)) {
+  df_raw[[emotion_names[i]]] <- sapply(df_raw[[emotion_raw[i]]], parse_emotion)
+}
+
+# ---- 4. 整理数据框 -----------------------------------------
+df <- df_raw %>%
+  mutate(
+    age    = as.numeric(age),
+    gender = factor(gender, levels = c(0,1), labels = c("Male","Female"))
+  ) %>%
+  filter(!is.na(age)) %>%
+  mutate(
+    age_group = case_when(
+      age >= 10 & age <= 18 ~ "Adolescent",
+      age >= 19 & age <= 35 ~ "Young Adult",
+      age >= 36 & age <= 60 ~ "Middle-aged",
+      age >  60              ~ "Older Adult"
+    ),
+    age_group = factor(age_group,
+                       levels = c("Adolescent","Young Adult","Middle-aged","Older Adult"))
+  )
+
+# SCL-90 总均分（★ 此时列已是数值型，不再报错）
+df$SCL90_total <- rowMeans(df[, scl90_dims], na.rm = TRUE)
+
+# ---- 5. 两个数据集 -----------------------------------------
+df_full    <- df                        # 全样本 n=151
+df_trimmed <- df %>% filter(age >= 12)  # 剔除10-11岁
+
+cat("=== 样本量核对 ===\n")
+cat("全样本 n =", nrow(df_full), "\n")
+cat("剔除10-11岁后 n =", nrow(df_trimmed), "\n")
+cat("被剔除 n =", nrow(df_full) - nrow(df_trimmed), "\n\n")
+
+# ---- 6. Kruskal-Wallis 核心函数 ----------------------------
+run_kruskal <- function(data, vars, group_var = "age_group") {
+  results <- lapply(vars, function(v) {
+    fml  <- as.formula(paste(v, "~", group_var))
+    test <- kruskal.test(fml, data = data)
+    k    <- nlevels(data[[group_var]])
+    n    <- sum(!is.na(data[[v]]))
+    eta2 <- max(0, (test$statistic - k + 1) / (n - k))
+
+    grp <- data %>%
+      group_by(!!sym(group_var)) %>%
+      summarise(
+        stat = paste0(round(mean(!!sym(v), na.rm=TRUE), 3),
+                      " (", round(sd(!!sym(v),  na.rm=TRUE), 3), ")"),
+        .groups = "drop"
+      ) %>%
+      pivot_wider(names_from = !!sym(group_var), values_from = stat)
+
+    data.frame(
+      Variable = v,
+      H        = round(test$statistic, 2),
+      df       = test$parameter,
+      p_value  = round(test$p.value, 4),
+      eta2     = round(eta2, 3),
+      grp,
+      check.names = FALSE
+    )
+  })
+  bind_rows(results)
+}
+
+# ---- 7. 运行分析 -------------------------------------------
+all_vars <- c(scl90_dims, "SCL90_total", big5)
+
+cat(">>> 全样本分析...\n")
+res_full    <- run_kruskal(df_full,    all_vars)
+
+cat(">>> 剔除10-11岁后分析...\n")
+res_trimmed <- run_kruskal(df_trimmed, all_vars)
+
+# ---- 8. 生成对比摘要表 -------------------------------------
+compare <- res_full %>%
+  select(Variable, H_full=H, p_full=p_value, eta2_full=eta2) %>%
+  left_join(
+    res_trimmed %>% select(Variable, H_trim=H, p_trim=p_value, eta2_trim=eta2),
+    by = "Variable"
+  ) %>%
+  mutate(
+    sig_full   = ifelse(p_full < 0.05, "sig", "ns"),
+    sig_trim   = ifelse(p_trim < 0.05, "sig", "ns"),
+    conclusion = ifelse(sig_full == sig_trim, "Consistent", "CHANGED")
+  )
+
+# ---- 9. 青少年组描述统计对比 --------------------------------
+make_desc <- function(data, label) {
+  data %>%
+    filter(age_group == "Adolescent") %>%
+    summarise(across(all_of(all_vars),
+                     list(M  = ~round(mean(., na.rm=TRUE), 3),
+                          SD = ~round(sd(.,   na.rm=TRUE), 3)))) %>%
+    mutate(Dataset = label) %>%
+    select(Dataset, everything())
+}
+
+n_adol_full <- nrow(filter(df_full,    age_group == "Adolescent"))
+n_adol_trim <- nrow(filter(df_trimmed, age_group == "Adolescent"))
+
+desc_adol <- bind_rows(
+  make_desc(df_full,    paste0("Full (n=",    n_adol_full, ")")),
+  make_desc(df_trimmed, paste0("Trimmed (n=", n_adol_trim, ")"))
+)
+
+# ---- 10. 输出 Excel ----------------------------------------
+wb_out <- createWorkbook()
+
+addWorksheet(wb_out, "Comparison Summary")
+writeData(wb_out, "Comparison Summary", compare)
+
+addWorksheet(wb_out, "Full Sample")
+writeData(wb_out, "Full Sample", res_full)
+
+addWorksheet(wb_out, "Trimmed age>=12")
+writeData(wb_out, "Trimmed age>=12", res_trimmed)
+
+addWorksheet(wb_out, "Adolescent Comparison")
+writeData(wb_out, "Adolescent Comparison", desc_adol)
+
+# 对比摘要列颜色高亮
+green <- createStyle(fgFill = "#C6EFCE", fontColour = "#276221")
+red   <- createStyle(fgFill = "#FFC7CE", fontColour = "#9C0006")
+ok_rows   <- which(compare$conclusion == "Consistent") + 1
+fail_rows <- which(compare$conclusion == "CHANGED")    + 1
+if (length(ok_rows)   > 0) addStyle(wb_out, "Comparison Summary", green, rows=ok_rows,   cols=ncol(compare), stack=TRUE)
+if (length(fail_rows) > 0) addStyle(wb_out, "Comparison Summary", red,   rows=fail_rows, cols=ncol(compare), stack=TRUE)
+
+out_file <- paste0(output_dir, "sensitivity_analysis_results.xlsx")
+saveWorkbook(wb_out, out_file, overwrite = TRUE)
+cat("\n✅ 结果已保存至：", out_file, "\n")
+
+# ---- 11. 控制台打印摘要 ------------------------------------
+cat("\n========== 敏感性分析摘要 ==========\n")
+print(compare[, c("Variable","H_full","p_full","eta2_full",
+                   "H_trim","p_trim","eta2_trim","conclusion")],
+      row.names = FALSE)
