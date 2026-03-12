@@ -1,0 +1,99 @@
+# ============================================================
+# SCL-90 分年龄组 Cronbach's α 分析（修复版）
+# ============================================================
+
+library(readxl)
+library(psych)
+library(dplyr)
+library(openxlsx)
+
+# ---- 1. 读取数据 ----
+df <- read_excel("C:/Users/48538/Desktop/新建文件夹/xg.xlsx")
+
+# ---- 2. 强制转换为数值型（清除混入的文字行）----
+scl90_cols <- c("SOM", "O-C", "I-S", "DEP", "ANX", "HOS", "PHOB", "PAR", "PSY")
+
+df$age_x <- as.numeric(df$age_x)
+for (col in scl90_cols) {
+  df[[col]] <- suppressWarnings(as.numeric(df[[col]]))
+}
+
+# 删除年龄或SCL-90任意列为NA的行
+df <- df %>% filter(!is.na(age_x))
+df <- df %>% filter(complete.cases(select(., all_of(scl90_cols))))
+
+cat(sprintf("清理后有效样本量：%d\n\n", nrow(df)))
+
+# ---- 3. 定义年龄组 ----
+df$age_group <- case_when(
+  df$age_x >= 10 & df$age_x <= 18 ~ "Adolescents (10-18)",
+  df$age_x >= 19 & df$age_x <= 35 ~ "Young Adults (19-35)",
+  df$age_x >= 36 & df$age_x <= 60 ~ "Middle-aged (36-60)",
+  df$age_x >= 61                   ~ "Older Adults (60+)",
+  TRUE ~ NA_character_
+)
+
+# ---- 4. 全样本 α ----
+alpha_total <- psych::alpha(df[, scl90_cols])
+cat("=== 全样本 SCL-90 Cronbach's α ===\n")
+cat(sprintf("α = %.3f\n\n", alpha_total$total$raw_alpha))
+
+# ---- 5. 分年龄组计算 α ----
+groups <- c("Adolescents (10-18)", "Young Adults (19-35)",
+            "Middle-aged (36-60)", "Older Adults (60+)")
+
+results <- data.frame(
+  Age_Group = character(),
+  N         = integer(),
+  Alpha     = numeric(),
+  CI_Lower  = numeric(),
+  CI_Upper  = numeric(),
+  stringsAsFactors = FALSE
+)
+
+cat("=== 分年龄组 SCL-90 Cronbach's α ===\n")
+for (g in groups) {
+  sub <- df %>% filter(age_group == g) %>% select(all_of(scl90_cols))
+  sub <- sub[complete.cases(sub), ]
+  n <- nrow(sub)
+
+  if (n >= 5) {
+    a         <- psych::alpha(sub)
+    alpha_val <- a$total$raw_alpha
+    alpha_se  <- a$total$ase
+    ci_lo     <- alpha_val - 1.96 * alpha_se
+    ci_hi     <- alpha_val + 1.96 * alpha_se
+
+    cat(sprintf("%-25s | n = %3d | α = %.3f  (95%% CI: %.3f – %.3f)\n",
+                g, n, alpha_val, ci_lo, ci_hi))
+
+    results <- rbind(results, data.frame(
+      Age_Group = g,
+      N         = n,
+      Alpha     = round(alpha_val, 3),
+      CI_Lower  = round(ci_lo, 3),
+      CI_Upper  = round(ci_hi, 3)
+    ))
+  } else {
+    cat(sprintf("%-25s | n = %3d | 样本量不足，跳过\n", g, n))
+  }
+}
+
+cat("\n注意：α基于9个SCL-90分量表得分（非90道原始条目）计算。\n")
+
+# ---- 6. 保存结果 ----
+output_path <- "C:/Users/48538/Desktop/新建文件夹 (9)/SCL90_alpha_by_age_group.xlsx"
+
+wb <- createWorkbook()
+addWorksheet(wb, "Alpha_Results")
+writeData(wb, "Alpha_Results", results)
+
+note <- data.frame(说明 = c(
+  "α基于9个SCL-90分量表（SOM/O-C/I-S/DEP/ANX/HOS/PHOB/PAR/PSY）计算",
+  "数据中无原始90条目，以分量表为单位反映跨维度内部一致性",
+  "α > 0.70 为可接受，> 0.80 为良好"
+))
+writeData(wb, "Alpha_Results", note, startRow = nrow(results) + 3)
+saveWorkbook(wb, output_path, overwrite = TRUE)
+
+cat(sprintf("\n结果已保存至：%s\n", output_path))
