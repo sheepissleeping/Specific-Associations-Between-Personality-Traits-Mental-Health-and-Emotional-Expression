@@ -56,3 +56,39 @@ cat("95% BCa CI:", round(ci_con$bca[4], 3), "-", round(ci_con$bca[5], 3), "\n")
 cat("\n=== Neuroticism ===\n")
 cat("η² =", round(boot_neu$t0, 3), "\n")
 cat("95% BCa CI:", round(ci_neu$bca[4], 3), "-", round(ci_neu$bca[5], 3), "\n")
+# 补充其余三个维度的bootstrap CI
+boot_eta2_agr <- function(data, indices) {
+  d <- data[indices, ]
+  eta2_kruskal(d$Agreeableness, d$age_group)
+}
+
+boot_eta2_ext <- function(data, indices) {
+  d <- data[indices, ]
+  eta2_kruskal(d$Extraversion, d$age_group)
+}
+
+boot_eta2_opn <- function(data, indices) {
+  d <- data[indices, ]
+  eta2_kruskal(d$Openness, d$age_group)
+}
+
+set.seed(42)
+boot_agr <- boot(data = data_clean, statistic = boot_eta2_agr, R = 2000)
+boot_ext <- boot(data = data_clean, statistic = boot_eta2_ext, R = 2000)
+boot_opn <- boot(data = data_clean, statistic = boot_eta2_opn, R = 2000)
+
+ci_agr <- boot.ci(boot_agr, type = "bca", conf = 0.95)
+ci_ext <- boot.ci(boot_ext, type = "bca", conf = 0.95)
+ci_opn <- boot.ci(boot_opn, type = "bca", conf = 0.95)
+
+cat("=== Agreeableness ===\n")
+cat("η² =", round(boot_agr$t0, 3), "\n")
+cat("95% BCa CI:", round(ci_agr$bca[4], 3), "-", round(ci_agr$bca[5], 3), "\n")
+
+cat("\n=== Extraversion ===\n")
+cat("η² =", round(boot_ext$t0, 3), "\n")
+cat("95% BCa CI:", round(ci_ext$bca[4], 3), "-", round(ci_ext$bca[5], 3), "\n")
+
+cat("\n=== Openness ===\n")
+cat("η² =", round(boot_opn$t0, 3), "\n")
+cat("95% BCa CI:", round(ci_opn$bca[4], 3), "-", round(ci_opn$bca[5], 3), "\n")
