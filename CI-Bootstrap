@@ -1,0 +1,58 @@
+library(openxlsx)
+library(boot)
+
+# 读取数据
+data <- read.xlsx("C:/Users/48538/Desktop/新建文件夹/xg.xlsx", sheet = 1)
+
+# 确认age_x和人格变量是数值型
+data$age_x <- as.numeric(data$age_x)
+data$Conscientiousness <- as.numeric(data$Conscientiousness)
+data$Neuroticism <- as.numeric(data$Neuroticism)
+
+# 分组变量
+data$age_group <- cut(data$age_x,
+                      breaks = c(9, 18, 35, 60, Inf),
+                      labels = c("Adolescent", "YoungAdult", "MiddleAge", "Older"))
+
+# 删除NA
+data_clean <- data[complete.cases(data[, c("age_group", "Conscientiousness", "Neuroticism")]), ]
+cat("有效样本量:", nrow(data_clean), "\n")
+cat("各组人数:\n")
+print(table(data_clean$age_group))
+
+# 定义η²计算函数
+eta2_kruskal <- function(x, group) {
+  H <- kruskal.test(x ~ group)$statistic
+  N <- length(x)
+  k <- length(unique(group))
+  eta2 <- (H - k + 1) / (N - k)
+  return(max(eta2, 0))  # η²不能为负
+}
+
+# Bootstrap函数
+boot_eta2_con <- function(data, indices) {
+  d <- data[indices, ]
+  eta2_kruskal(d$Conscientiousness, d$age_group)
+}
+
+boot_eta2_neu <- function(data, indices) {
+  d <- data[indices, ]
+  eta2_kruskal(d$Neuroticism, d$age_group)
+}
+
+# 运行Bootstrap（2000次）
+set.seed(42)
+boot_con <- boot(data = data_clean, statistic = boot_eta2_con, R = 2000)
+boot_neu <- boot(data = data_clean, statistic = boot_eta2_neu, R = 2000)
+
+# 提取95% CI（BCa方法最准确）
+ci_con <- boot.ci(boot_con, type = "bca", conf = 0.95)
+ci_neu <- boot.ci(boot_neu, type = "bca", conf = 0.95)
+
+cat("\n=== Conscientiousness ===\n")
+cat("η² =", round(boot_con$t0, 3), "\n")
+cat("95% BCa CI:", round(ci_con$bca[4], 3), "-", round(ci_con$bca[5], 3), "\n")
+
+cat("\n=== Neuroticism ===\n")
+cat("η² =", round(boot_neu$t0, 3), "\n")
+cat("95% BCa CI:", round(ci_neu$bca[4], 3), "-", round(ci_neu$bca[5], 3), "\n")
