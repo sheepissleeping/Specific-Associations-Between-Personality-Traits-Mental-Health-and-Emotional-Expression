@@ -14,7 +14,6 @@ emotion_vars <- c("anger", "disgust", "fear", "happy", "neutral", "sad", "surpri
 psych_vars   <- c("Neuroticism", "Agreeableness", "Conscientiousness",
                   "Openness", "Extraversion", "DEP", "ANX", "HOS", "I-S")
 
-# ⚡ 修复1：强制将心理变量转为数值（Neuroticism可能被读为字符型）
 df <- df %>% mutate(across(all_of(psych_vars), ~suppressWarnings(as.numeric(.))))
 
 parse_frames <- function(x) {
@@ -43,18 +42,12 @@ icc_results <- data.frame(emotion=character(), ICC=numeric(),
 
 for (e in emotion_vars) {
   frame_list <- lapply(df[[e]], parse_frames)
-  
-  # ⚡ 修复2：过滤掉帧数为0的被试（空数据行）
   valid      <- sapply(frame_list, length) > 0
   frame_list <- frame_list[valid]
-  
   min_frames <- min(sapply(frame_list, length))
   cat(sprintf("%s: 有效被试=%d, 最少帧数=%d\n", e, sum(valid), min_frames))
-  
   mat <- do.call(rbind, lapply(frame_list, function(x) x[1:min_frames]))
-  
   res <- icc(mat, model="oneway", type="consistency", unit="single")
-  
   icc_results <- rbind(icc_results, data.frame(
     emotion = e,
     ICC     = round(res$value, 3),
@@ -67,22 +60,56 @@ for (e in emotion_vars) {
 print(icc_results)
 
 # ============================================================
-# 4. K-means 聚类
+# 4. K-means 聚类（不做标准化，与论文一致）
 # ============================================================
 emotion_mean_vars <- paste0(emotion_vars, "_mean")
 
 df_clean <- df[complete.cases(df[, c(emotion_mean_vars, psych_vars)]), ]
 cat(sprintf("\n有效被试数: %d\n", nrow(df_clean)))
 
-X <- scale(df_clean[, emotion_mean_vars])
+X <- as.matrix(df_clean[, emotion_mean_vars])
 
 set.seed(42)
-km <- kmeans(X, centers=3, nstart=25, iter.max=100)
-df_clean$cluster <- km$cluster
+km <- kmeans(X, centers=3, nstart=100, iter.max=100)
+df_clean$cluster_raw <- km$cluster
 
-cat("\n各簇人数:\n"); print(table(df_clean$cluster))
+# ============================================================
+# ✅ 聚类重新编号，严格对齐论文定义：
+#    Cluster 1 = happy均值最高（幸福主导，n=17）
+#    Cluster 2 = anger+disgust+fear均值最高（负性情绪主导，n=90）
+#    Cluster 3 = 剩余（中性/悲伤/惊讶主导，n=44）
+# ============================================================
+cluster_profiles <- df_clean %>%
+  group_by(cluster_raw) %>%
+  summarise(
+    n            = n(),
+    happy_avg    = mean(happy_mean),
+    negative_avg = mean(anger_mean + disgust_mean + fear_mean)
+  ) %>%
+  as.data.frame()
 
-cat("\n各簇情绪均值（用于判断簇特征）:\n")
+# C1：happy均值最高的簇
+c1_raw <- cluster_profiles$cluster_raw[which.max(cluster_profiles$happy_avg)]
+
+# C2：剩余两簇中负性情绪均值最高的簇
+remaining <- cluster_profiles[cluster_profiles$cluster_raw != c1_raw, ]
+c2_raw <- remaining$cluster_raw[which.max(remaining$negative_avg)]
+
+# C3：剩余最后一个
+c3_raw <- setdiff(1:3, c(c1_raw, c2_raw))
+
+cat(sprintf("\n聚类编号映射: 原%d->C1(幸福,n=%d), 原%d->C2(负性,n=%d), 原%d->C3(中性,n=%d)\n",
+            c1_raw, cluster_profiles$n[cluster_profiles$cluster_raw==c1_raw],
+            c2_raw, cluster_profiles$n[cluster_profiles$cluster_raw==c2_raw],
+            c3_raw, cluster_profiles$n[cluster_profiles$cluster_raw==c3_raw]))
+
+df_clean$cluster <- ifelse(df_clean$cluster_raw == c1_raw, 1,
+                    ifelse(df_clean$cluster_raw == c2_raw, 2, 3))
+
+cat("\n各簇人数（重新编号后）:\n")
+print(table(df_clean$cluster))
+
+cat("\n各簇情绪均值（重新编号后）:\n")
 cluster_emotion <- df_clean %>%
   group_by(cluster) %>%
   summarise(across(all_of(emotion_mean_vars), ~round(mean(.),3)))
@@ -108,26 +135,52 @@ desc_long <- df_clean %>%
 print(as.data.frame(desc_long))
 
 # ============================================================
-# 6. Cohen's d（SMD）及 95% CI
+# 6. Cohen's d 及 95% Bootstrap CI
 # ============================================================
-cohen_d <- function(x, y) {
+cohen_d_boot <- function(x, y, B=2000) {
   x <- x[!is.na(x)]; y <- y[!is.na(y)]
   nx <- length(x); ny <- length(y)
-  pooled_sd <- sqrt(((nx-1)*var(x) + (ny-1)*var(y)) / (nx+ny-2))
-  d  <- (mean(x) - mean(y)) / pooled_sd
-  se <- sqrt((nx+ny)/(nx*ny) + d^2/(2*(nx+ny-2)))
-  c(d=round(d,3), lo=round(d-1.96*se,3), hi=round(d+1.96*se,3))
+
+  vx_orig <- var(x); vy_orig <- var(y)
+  pooled_sd <- sqrt(((nx-1)*vx_orig + (ny-1)*vy_orig) / (nx+ny-2))
+  d_obs <- (mean(x) - mean(y)) / pooled_sd
+
+  set.seed(42)
+  d_boot <- rep(NA_real_, B)
+  for (i in seq_len(B)) {
+    bx <- sample(x, nx, replace=TRUE)
+    by <- sample(y, ny, replace=TRUE)
+
+    vx <- var(bx); vy <- var(by)
+    if (!is.finite(vx) || vx == 0) vx <- vx_orig
+    if (!is.finite(vy) || vy == 0) vy <- vy_orig
+
+    ps <- sqrt(((nx-1)*vx + (ny-1)*vy) / (nx+ny-2))
+
+    if (is.finite(ps) && ps > 0) {
+      d_boot[i] <- (mean(bx) - mean(by)) / ps
+    } else {
+      d_boot[i] <- d_obs
+    }
+  }
+
+  d_boot_clean <- d_boot[is.finite(d_boot)]
+  ci <- quantile(d_boot_clean, probs=c(0.025, 0.975))
+
+  c(d  = round(d_obs,         3),
+    lo = round(unname(ci[1]), 3),
+    hi = round(unname(ci[2]), 3))
 }
 
-cat("\n========== Cohen's d 及 95% CI ==========\n")
+cat("\n========== Cohen's d 及 95% Bootstrap CI ==========\n")
 
 smd_rows <- list()
 for (p in list(c(1,2), c(1,3), c(2,3))) {
   ca <- p[1]; cb <- p[2]
-  grp_a <- df_clean[df_clean$cluster==ca, ]
-  grp_b <- df_clean[df_clean$cluster==cb, ]
+  grp_a <- df_clean[df_clean$cluster == ca, ]
+  grp_b <- df_clean[df_clean$cluster == cb, ]
   for (pv in psych_vars) {
-    res <- cohen_d(grp_a[[pv]], grp_b[[pv]])
+    res <- cohen_d_boot(grp_a[[pv]], grp_b[[pv]], B=2000)
     smd_rows[[length(smd_rows)+1]] <- data.frame(
       comparison = paste0("C",ca," vs C",cb),
       variable   = pv,
@@ -135,12 +188,13 @@ for (p in list(c(1,2), c(1,3), c(2,3))) {
       CI_lo      = res["lo"],
       CI_hi      = res["hi"]
     )
+    cat(sprintf("C%d vs C%d | %-20s | d=%7.3f  95%%CI [%.3f, %.3f]\n",
+                ca, cb, pv, res["d"], res["lo"], res["hi"]))
   }
 }
 
 smd_df <- do.call(rbind, smd_rows)
 rownames(smd_df) <- NULL
-print(smd_df)
 
 # ============================================================
 # 7. 保存
