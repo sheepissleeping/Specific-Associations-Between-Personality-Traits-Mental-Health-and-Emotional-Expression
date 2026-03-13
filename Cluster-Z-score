@@ -1,0 +1,66 @@
+library(openxlsx)
+
+data <- read.xlsx("C:/Users/48538/Desktop/新建文件夹/xg.xlsx", sheet = 1)
+
+emotion_vars <- c("anger", "disgust", "fear", "happy", "neutral", "sad", "surprise")
+
+parse_mean <- function(x) {
+  vals <- suppressWarnings(as.numeric(unlist(strsplit(as.character(x), ",\\s*"))))
+  vals <- vals[!is.na(vals)]
+  if (length(vals) == 0) return(NA)
+  mean(vals)
+}
+
+for (v in emotion_vars) {
+  data[[v]] <- sapply(data[[v]], parse_mean)
+}
+
+# 删除NA行
+emo_data <- data[complete.cases(data[, emotion_vars]), emotion_vars]
+cat("最终有效行数:", nrow(emo_data), "\n")
+
+# 原始数据聚类
+set.seed(42)
+km_raw <- kmeans(emo_data, centers = 3, nstart = 100)
+
+# Z-score标准化聚类
+emo_scaled <- scale(emo_data)
+set.seed(42)
+km_scaled <- kmeans(emo_scaled, centers = 3, nstart = 100)
+
+# 原始聚类中心
+centers_raw <- as.data.frame(km_raw$centers)
+centers_raw$Cluster <- paste0("Cluster ", 1:3)
+centers_raw$Method <- "Raw"
+
+# Z-score中心反变换回原始尺度
+centers_scaled_back <- as.data.frame(
+  t(t(km_scaled$centers) * attr(emo_scaled, "scaled:scale") +
+      attr(emo_scaled, "scaled:center"))
+)
+centers_scaled_back$Cluster <- paste0("Cluster ", 1:3)
+centers_scaled_back$Method <- "Z-score"
+
+centers_all <- rbind(centers_raw, centers_scaled_back)
+
+# 列联表
+contingency <- table(Raw = km_raw$cluster, Zscored = km_scaled$cluster)
+cat("\n列联表 (Raw vs Z-score):\n")
+print(contingency)
+
+contingency_df <- as.data.frame.matrix(contingency)
+contingency_df$Raw_Cluster <- rownames(contingency_df)
+
+# 输出Excel
+wb <- createWorkbook()
+addWorksheet(wb, "Cluster_Centers")
+writeData(wb, "Cluster_Centers", centers_all)
+addWorksheet(wb, "Contingency_Table")
+writeData(wb, "Contingency_Table", contingency_df)
+saveWorkbook(wb, "C:/Users/48538/Desktop/新建文件夹 (9)/standardization_comparison.xlsx", overwrite = TRUE)
+
+cat("\n完成！文件已保存。\n")
+cat("\n原始聚类各组人数:\n")
+print(table(km_raw$cluster))
+cat("\nZ-score聚类各组人数:\n")
+print(table(km_scaled$cluster))
