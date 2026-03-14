@@ -1,0 +1,216 @@
+library(readxl)
+library(dplyr)
+library(pROC)
+library(car)
+library(ResourceSelection)
+library(ggplot2)
+
+# ============================================================
+# 1. 读取数据
+# ============================================================
+df <- read_excel("C:/Users/48538/Desktop/新建文件夹/xg.xlsx")
+
+scl_vars <- c("SOM","O-C","I-S","DEP","ANX","HOS","PHOB","PAR","PSY")
+big5_vars <- c("Neuroticism","Agreeableness","Conscientiousness","Openness","Extraversion")
+
+df <- df %>% mutate(across(all_of(c(big5_vars, scl_vars)),
+                            ~suppressWarnings(as.numeric(.))))
+
+out_dir <- "C:/Users/48538/Desktop/新建文件夹"
+
+# ============================================================
+# 2. 风险标签（与原代码完全一致）
+# ============================================================
+make_risk_binary <- function(dat, scl_cols, thr1_any, thr2_mean, thr3_val, thr3_count) {
+  scl <- dat[, scl_cols]
+  c1 <- as.integer(apply(scl, 1, function(x) any(x >= thr1_any, na.rm=TRUE)))
+  c2 <- as.integer(rowMeans(scl, na.rm=TRUE) >= thr2_mean)
+  c3 <- as.integer(rowSums(scl >= thr3_val, na.rm=TRUE) >= thr3_count)
+  score <- c1 + c2 + c3
+  as.integer(score >= 1)   # 0=低风险，1=中/高风险
+}
+
+df$risk_binary <- make_risk_binary(df, scl_vars,
+                                    thr1_any=2.0, thr2_mean=2.0,
+                                    thr3_val=1.5, thr3_count=3)
+
+cat(sprintf("\n风险分布: 低风险=%d(%.1f%%), 中/高风险=%d(%.1f%%)\n",
+            sum(df$risk_binary==0, na.rm=TRUE),
+            100*mean(df$risk_binary==0, na.rm=TRUE),
+            sum(df$risk_binary==1, na.rm=TRUE),
+            100*mean(df$risk_binary==1, na.rm=TRUE)))
+
+# ============================================================
+# 3. 基准逻辑回归（标准化Big Five）
+# ============================================================
+df_model <- df %>%
+  select(all_of(c("risk_binary", big5_vars))) %>%
+  filter(complete.cases(.)) %>%
+  mutate(across(all_of(big5_vars), scale))
+
+for (v in big5_vars) df_model[[v]] <- as.numeric(df_model[[v]])
+
+fit <- glm(risk_binary ~ Neuroticism + Agreeableness +
+             Conscientiousness + Openness + Extraversion,
+           data=df_model, family=binomial)
+
+cat("\n========== 模型摘要 ==========\n")
+print(summary(fit))
+
+# ============================================================
+# 4. 问题(2a) VIF
+# ============================================================
+cat("\n========== VIF ==========\n")
+vif_vals <- vif(fit)
+print(round(vif_vals, 3))
+write.csv(data.frame(Predictor=names(vif_vals), VIF=round(vif_vals,3)),
+          file.path(out_dir, "VIF_results.csv"), row.names=FALSE)
+
+# ============================================================
+# 5. 问题(2b) Hosmer-Lemeshow 检验
+# ============================================================
+cat("\n========== Hosmer-Lemeshow 检验 ==========\n")
+hl <- hoslem.test(df_model$risk_binary, fitted(fit), g=10)
+print(hl)
+write.csv(data.frame(chi_sq=round(hl$statistic,3),
+                     df_hl=hl$parameter,
+                     p_value=round(hl$p.value,3)),
+          file.path(out_dir, "HosmerLemeshow.csv"), row.names=FALSE)
+
+# ============================================================
+# 6. 问题(2c) 校准图
+# ============================================================
+cal_df <- data.frame(pred=fitted(fit), obs=df_model$risk_binary) %>%
+  mutate(decile=ntile(pred, 10)) %>%
+  group_by(decile) %>%
+  summarise(mean_pred=mean(pred), mean_obs=mean(obs), .groups="drop")
+
+p_cal <- ggplot(cal_df, aes(x=mean_pred, y=mean_obs)) +
+  geom_abline(slope=1, intercept=0, linetype="dashed", color="red") +
+  geom_point(size=3, color="#2E75B6") +
+  geom_line(color="#2E75B6") +
+  coord_cartesian(xlim=c(0,1), ylim=c(0,1)) +
+  labs(x="Predicted Probability", y="Observed Proportion",
+       title="Calibration Plot") +
+  theme_bw(base_size=13)
+
+ggsave(file.path(out_dir, "Calibration_plot.png"), p_cal,
+       width=5, height=4.5, dpi=300)
+cat("✅ 校准图已保存\n")
+
+# ============================================================
+# 7. 问题(4) Bootstrap 乐观度校正 AUC
+# ============================================================
+cat("\n========== Bootstrap 校正 AUC (B=1000) ==========\n")
+set.seed(42)
+B <- 1000
+n <- nrow(df_model)
+auc_orig <- as.numeric(auc(roc(df_model$risk_binary, fitted(fit), quiet=TRUE)))
+cat(sprintf("原始 AUC = %.4f\n", auc_orig))
+
+optimism_vec <- numeric(B)
+for (i in seq_len(B)) {
+  idx   <- sample(n, n, replace=TRUE)
+  boot  <- df_model[idx, ]
+  fit_b <- tryCatch(
+    glm(risk_binary ~ Neuroticism + Agreeableness +
+          Conscientiousness + Openness + Extraversion,
+        data=boot, family=binomial),
+    error=function(e) NULL)
+  if (is.null(fit_b)) next
+
+  auc_boot  <- as.numeric(auc(roc(boot$risk_binary,
+                                   fitted(fit_b), quiet=TRUE)))
+  auc_orig_b <- as.numeric(auc(roc(df_model$risk_binary,
+                                    predict(fit_b, df_model, type="response"),
+                                    quiet=TRUE)))
+  optimism_vec[i] <- auc_boot - auc_orig_b
+}
+
+optimism      <- mean(optimism_vec[optimism_vec != 0], na.rm=TRUE)
+auc_corrected <- auc_orig - optimism
+cat(sprintf("乐观度 (optimism)  = %.4f\n", optimism))
+cat(sprintf("校正后 AUC         = %.4f\n", auc_corrected))
+
+write.csv(data.frame(
+  AUC_original  = round(auc_orig, 4),
+  Optimism      = round(optimism, 4),
+  AUC_corrected = round(auc_corrected, 4)),
+  file.path(out_dir, "Bootstrap_AUC.csv"), row.names=FALSE)
+
+# ============================================================
+# 8. 问题(1) 阈值敏感性分析
+# ============================================================
+cat("\n========== 阈值敏感性分析 ==========\n")
+
+threshold_sets <- list(
+  "宽松(any≥1.5 / mean≥1.5 / ≥3维≥1.2)" = c(1.5, 1.5, 1.2, 3),
+  "基准(any≥2.0 / mean≥2.0 / ≥3维≥1.5)" = c(2.0, 2.0, 1.5, 3),
+  "严格(any≥2.5 / mean≥2.0 / ≥3维≥2.0)" = c(2.5, 2.0, 2.0, 3)
+)
+
+sens_rows <- list()
+for (nm in names(threshold_sets)) {
+  th <- threshold_sets[[nm]]
+  hr <- make_risk_binary(df, scl_vars,
+                          thr1_any=th[1], thr2_mean=th[2],
+                          thr3_val=th[3], thr3_count=th[4])
+  n_high <- sum(hr==1, na.rm=TRUE)
+  pct    <- round(100*mean(hr==1, na.rm=TRUE), 1)
+
+  dm <- df %>%
+    select(all_of(big5_vars)) %>%
+    mutate(across(everything(), scale)) %>%
+    bind_cols(risk_binary=hr) %>%
+    filter(complete.cases(.))
+  for (v in big5_vars) dm[[v]] <- as.numeric(dm[[v]])
+
+  if (n_high < 10 || n_high > nrow(dm)-10) {
+    cat(sprintf("%s: 高风险=%d(%.1f%%) — 样本过少，跳过\n", nm, n_high, pct))
+    next
+  }
+
+  ft <- tryCatch(
+    glm(risk_binary ~ Neuroticism + Agreeableness +
+          Conscientiousness + Openness + Extraversion,
+        data=dm, family=binomial),
+    error=function(e) NULL)
+  if (is.null(ft)) next
+
+  roc_obj <- roc(dm$risk_binary, fitted(ft), quiet=TRUE)
+  auc_val <- round(as.numeric(auc(roc_obj)), 3)
+  ci_val  <- round(as.numeric(ci.auc(roc_obj)), 3)
+  best    <- coords(roc_obj, "best",
+                    ret=c("threshold","sensitivity","specificity"))
+  hl_t    <- tryCatch(hoslem.test(dm$risk_binary, fitted(ft), g=10),
+                       error=function(e) NULL)
+  hl_p    <- if (!is.null(hl_t)) round(hl_t$p.value, 3) else NA
+
+  sens_rows[[nm]] <- data.frame(
+    Threshold_set = nm,
+    N_medium_high = n_high,
+    Pct           = pct,
+    AUC           = auc_val,
+    CI_lo         = ci_val[1],
+    CI_hi         = ci_val[3],
+    Opt_threshold = round(best$threshold, 3),
+    Sensitivity   = round(best$sensitivity, 3),
+    Specificity   = round(best$specificity, 3),
+    HL_p          = hl_p
+  )
+  cat(sprintf("%s: n=%d(%.1f%%), AUC=%.3f [%.3f,%.3f], HL_p=%.3f\n",
+              nm, n_high, pct, auc_val, ci_val[1], ci_val[3],
+              ifelse(is.na(hl_p), NA, hl_p)))
+}
+
+sens_df <- do.call(rbind, sens_rows)
+rownames(sens_df) <- NULL
+write.csv(sens_df, file.path(out_dir, "Sensitivity_analysis.csv"), row.names=FALSE)
+
+# ============================================================
+# 9. 完成
+# ============================================================
+cat("\n✅ 全部完成，文件保存至:", out_dir, "\n")
+cat("   VIF_results.csv\n   HosmerLemeshow.csv\n")
+cat("   Calibration_plot.png\n   Bootstrap_AUC.csv\n")
+cat("   Sensitivity_analysis.csv\n")
